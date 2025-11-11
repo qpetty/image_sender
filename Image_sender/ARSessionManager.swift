@@ -883,8 +883,8 @@ class ARSessionManager: NSObject, ObservableObject {
         orientation: UIInterfaceOrientation
     ) -> (simd_float3x3, Int, Int) {
         var adjustedIntrinsics = intrinsics
-        var finalWidth = imageWidth / 2
-        var finalHeight = imageHeight / 2
+        var finalWidth = imageWidth
+        var finalHeight = imageHeight
         
         // Extract intrinsic parameters
         let fx = intrinsics[0][0]  // Focal length in x
@@ -898,8 +898,8 @@ class ARSessionManager: NSObject, ObservableObject {
         case .portrait, .portraitUpsideDown:
             // Portrait mode: image rotated 90° clockwise
             // Dimensions swap: width becomes height, height becomes width
-            finalWidth = imageHeight
-            finalHeight = imageWidth
+            finalWidth = imageHeight / 2
+            finalHeight = imageWidth / 2
             adjustedIntrinsics = simd_float3x3(
                 simd_float3(fx, 0, Float(finalWidth) - cx),
                 simd_float3(0, fy, Float(finalHeight) - cy),
@@ -908,8 +908,8 @@ class ARSessionManager: NSObject, ObservableObject {
         case .landscapeRight, .landscapeLeft:
             // Landscape right: image rotated 180°
             // Dimensions stay the same, but principal point flips
-            finalWidth = imageWidth
-            finalHeight = imageHeight
+            finalWidth = imageWidth / 2
+            finalHeight = imageHeight / 2
             adjustedIntrinsics = simd_float3x3(
                 simd_float3(fx, 0, Float(finalWidth) - cx),
                 simd_float3(0, fy, Float(finalHeight) - cy),
@@ -918,8 +918,8 @@ class ARSessionManager: NSObject, ObservableObject {
         default:
             // Unknown orientation: use original intrinsics
             adjustedIntrinsics = intrinsics
-            finalWidth = imageWidth
-            finalHeight = imageHeight
+            finalWidth = imageWidth / 2
+            finalHeight = imageHeight / 2
         }
         
         return (adjustedIntrinsics, finalWidth, finalHeight)
