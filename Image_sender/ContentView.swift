@@ -94,6 +94,23 @@ struct ContentView: View {
                         }
                         .disabled(sessionManager.isHostMode) // Disable if host mode is active
                     }
+                    
+                    // Send to Server Button
+                    Button(action: {
+                        sessionManager.sendFrameToServer()
+                    }) {
+                        VStack {
+                            Image(systemName: "arrow.up.circle.fill")
+                                .font(.system(size: 30))
+                            Text("Send to Server")
+                                .font(.caption)
+                        }
+                        .frame(width: 100, height: 80)
+                        .background(Color.cyan)
+                        .foregroundColor(.white)
+                        .cornerRadius(15)
+                    }
+                    .disabled(!sessionManager.isSessionRunning) // Disable if AR session not running
                 }
                 .padding(.bottom, 30)
                 

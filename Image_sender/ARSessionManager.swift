@@ -10,6 +10,8 @@ import Combine
 import ARKit
 import RealityKit
 import MultipeerConnectivity
+import UIKit
+import CoreImage
 
 class ARSessionManager: NSObject, ObservableObject {
     @Published var isSessionRunning = false
@@ -33,6 +35,10 @@ class ARSessionManager: NSObject, ObservableObject {
     private var sessionStartTime: Date?
     private var multipeerConnectivityService: MultipeerConnectivityService?
     private var sceneUpdateSubscription: Cancellable?
+    
+    // Server configuration
+    private let serverIP = "192.168.4.21"
+    private let serverPort: UInt16 = 8080
     
     // Multipeer Connectivity
     // Service type must be 1-15 characters, alphanumeric and hyphens only
@@ -653,6 +659,181 @@ class ARSessionManager: NSObject, ObservableObject {
         
         // Client will receive the sphere from host via SynchronizationService once relocalized
         print("Client: Removed local sphere, will receive synchronized sphere from host")
+    }
+    
+    // MARK: - Server Communication
+    func sendFrameToServer() {
+        guard let arSession = arSession, let currentFrame = arSession.currentFrame else {
+            DispatchQueue.main.async {
+                self.statusMessage = "No AR frame available"
+            }
+            return
+        }
+        
+        guard let sphereARAnchor = sphereARAnchor else {
+            DispatchQueue.main.async {
+                self.statusMessage = "No sphere anchor found"
+            }
+            return
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Extract camera intrinsics
+            let camera = currentFrame.camera
+            let intrinsics = camera.intrinsics
+            let intrinsicsArray = [
+                intrinsics[0][0], intrinsics[0][1], intrinsics[0][2],
+                intrinsics[1][0], intrinsics[1][1], intrinsics[1][2],
+                intrinsics[2][0], intrinsics[2][1], intrinsics[2][2]
+            ]
+            
+            // Calculate camera to sphere extrinsics
+            // Camera transform in world coordinates
+            let cameraTransform = camera.transform
+            
+            // Sphere transform in world coordinates
+            let sphereTransform = sphereARAnchor.transform
+            
+            // Calculate relative transform: camera to sphere
+            // T_camera_to_sphere = T_sphere^-1 * T_camera
+            let sphereTransformInverse = sphereTransform.inverse
+            let cameraToSphereTransform = sphereTransformInverse * cameraTransform
+            
+            // Convert to array (column-major order)
+            var extrinsicsArray: [Float] = []
+            for col in 0..<4 {
+                for row in 0..<4 {
+                    extrinsicsArray.append(cameraToSphereTransform[row][col])
+                }
+            }
+            
+            // Convert captured image to JPEG
+            let pixelBuffer = currentFrame.capturedImage
+            guard let imageData = self.pixelBufferToJPEG(pixelBuffer: pixelBuffer) else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Failed to convert image to JPEG"
+                }
+                return
+            }
+            
+            // Get image dimensions
+            let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
+            let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
+            
+            // Create metadata dictionary
+            let metadata: [String: Any] = [
+                "intrinsics": intrinsicsArray,
+                "extrinsics": extrinsicsArray,
+                "image_size": imageData.count,
+                "image_width": imageWidth,
+                "image_height": imageHeight
+            ]
+            
+            // Send to server
+            self.sendToServer(metadata: metadata, imageData: imageData)
+        }
+    }
+    
+    private func pixelBufferToJPEG(pixelBuffer: CVPixelBuffer) -> Data? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            return nil
+        }
+        
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right) // ARKit images are rotated
+        guard let jpegData = uiImage.jpegData(compressionQuality: 0.8) else {
+            return nil
+        }
+        
+        return jpegData
+    }
+    
+    private func sendToServer(metadata: [String: Any], imageData: Data) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: metadata) else {
+            DispatchQueue.main.async {
+                self.statusMessage = "Failed to serialize metadata"
+            }
+            return
+        }
+        
+        // Create URL
+        guard let url = URL(string: "http://\(serverIP):\(serverPort)/upload_frame") else {
+            DispatchQueue.main.async {
+                self.statusMessage = "Invalid server URL"
+            }
+            return
+        }
+        
+        // Create multipart form data request
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        
+        // Build multipart body
+        var body = Data()
+        
+        // Add metadata as JSON
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"metadata\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        body.append(jsonData)
+        body.append("\r\n".data(using: .utf8)!)
+        
+        // Add image
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"frame.jpg\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(imageData)
+        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        
+        request.httpBody = body
+        request.setValue("\(body.count)", forHTTPHeaderField: "Content-Length")
+        
+        // Send request
+        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self = self else { return }
+            
+            if let error = error {
+                print("Error sending frame: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.statusMessage = "Failed to send: \(error.localizedDescription)"
+                }
+                return
+            }
+            
+            guard let httpResponse = response as? HTTPURLResponse else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Invalid server response"
+                }
+                return
+            }
+            
+            if httpResponse.statusCode == 200 {
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let status = json["status"] as? String, status == "received" {
+                    DispatchQueue.main.async {
+                        self.statusMessage = "Frame sent to server successfully"
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        self.statusMessage = "Frame sent (response received)"
+                    }
+                }
+            } else {
+                let errorMessage = String(data: data ?? Data(), encoding: .utf8) ?? "Unknown error"
+                print("Server error: \(httpResponse.statusCode) - \(errorMessage)")
+                DispatchQueue.main.async {
+                    self.statusMessage = "Server error: \(httpResponse.statusCode)"
+                }
+            }
+        }
+        
+        task.resume()
     }
 }
 
