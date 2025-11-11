@@ -66,10 +66,15 @@ class ARSessionManager: NSObject, ObservableObject {
         setupSynchronizationService()
     }
     
-    // Handle tap gestures to move sphere (host only)
+    // Handle tap gestures to place or move sphere (host only)
     @objc func handleTap(_ gesture: UITapGestureRecognizer) {
-        // Only allow moving sphere if we're the host
-        guard isHostMode, let arView = arView, let currentSphereAnchor = sphereAnchor, let currentSphereEntity = sphereEntity else {
+        // Only allow placing/moving sphere if we're the host and AR session is running
+        guard isHostMode, isSessionRunning, let arView = arView else {
+            if isHostMode && !isSessionRunning {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Start AR session first to place sphere"
+                }
+            }
             return
         }
         
@@ -97,48 +102,53 @@ class ARSessionManager: NSObject, ObservableObject {
                 firstResult.worldTransform.columns.3.z
             )
             
-            // Move the sphere by updating the ARAnchor's transform
-            // This ensures proper coordinate system alignment across devices
-            // Create a new transform matrix with the new position
+            // Create transform matrix with the new position
             var transform = matrix_identity_float4x4
             transform.columns.3.x = worldPosition.x
             transform.columns.3.y = worldPosition.y
             transform.columns.3.z = worldPosition.z
             
-            // Remove old anchor and create new one with updated position
-            if let oldAnchor = sphereARAnchor {
-                arView.session.remove(anchor: oldAnchor)
-            }
-            
-            let newARAnchor = ARAnchor(name: "sphereAnchor", transform: transform)
-            self.sphereARAnchor = newARAnchor
-            arView.session.add(anchor: newARAnchor)
-            
-            // Update the AnchorEntity to use the new ARAnchor
-            // Remove old anchor entity and create new one
-            arView.scene.removeAnchor(currentSphereAnchor)
-            
-            let newAnchor = AnchorEntity(anchor: newARAnchor)
-            
-            // Re-add SynchronizationComponent to the new anchor
-            var anchorSync = SynchronizationComponent()
-            anchorSync.ownershipTransferMode = .autoAccept
-            newAnchor.components[SynchronizationComponent.self] = anchorSync
-            
-            // Re-add the sphere entity to the new anchor
-            // Re-add SynchronizationComponent to sphere if needed
-            var sphereSync = SynchronizationComponent()
-            sphereSync.ownershipTransferMode = .autoAccept
-            currentSphereEntity.components[SynchronizationComponent.self] = sphereSync
-            
-            newAnchor.addChild(currentSphereEntity)
-            
-            arView.scene.addAnchor(newAnchor)
-            self.sphereAnchor = newAnchor
-            
-            print("Host: Moved sphere to position: \(worldPosition)")
-            DispatchQueue.main.async {
-                self.statusMessage = "Sphere moved to plane"
+            // Check if sphere already exists
+            if let currentSphereAnchor = sphereAnchor, let currentSphereEntity = sphereEntity {
+                // Sphere exists - move it to the new position
+                // Remove old anchor and create new one with updated position
+                if let oldAnchor = sphereARAnchor {
+                    arView.session.remove(anchor: oldAnchor)
+                }
+                
+                let newARAnchor = ARAnchor(name: "sphereAnchor", transform: transform)
+                self.sphereARAnchor = newARAnchor
+                arView.session.add(anchor: newARAnchor)
+                
+                // Update the AnchorEntity to use the new ARAnchor
+                // Remove old anchor entity and create new one
+                arView.scene.removeAnchor(currentSphereAnchor)
+                
+                let newAnchor = AnchorEntity(anchor: newARAnchor)
+                
+                // Re-add SynchronizationComponent to the new anchor
+                var anchorSync = SynchronizationComponent()
+                anchorSync.ownershipTransferMode = .autoAccept
+                newAnchor.components[SynchronizationComponent.self] = anchorSync
+                
+                // Re-add the sphere entity to the new anchor
+                // Re-add SynchronizationComponent to sphere if needed
+                var sphereSync = SynchronizationComponent()
+                sphereSync.ownershipTransferMode = .autoAccept
+                currentSphereEntity.components[SynchronizationComponent.self] = sphereSync
+                
+                newAnchor.addChild(currentSphereEntity)
+                
+                arView.scene.addAnchor(newAnchor)
+                self.sphereAnchor = newAnchor
+                
+                print("Host: Moved sphere to position: \(worldPosition)")
+                DispatchQueue.main.async {
+                    self.statusMessage = "Sphere moved to plane"
+                }
+            } else {
+                // Sphere doesn't exist - create it at the tap location
+                createSphereAtPosition(transform: transform, worldPosition: worldPosition)
             }
         } else {
             // No plane detected at tap location
@@ -224,10 +234,86 @@ class ARSessionManager: NSObject, ObservableObject {
         isSphereSynchronized = false
     }
     
+    // Create sphere at a specific position (used when placing via tap)
+    private func createSphereAtPosition(transform: simd_float4x4, worldPosition: simd_float3) {
+        // Only host creates the sphere - it will be synced to clients via SynchronizationService
+        guard isHostMode, let arView = arView else {
+            print("Client device: Not creating sphere (will receive from host via sync)")
+            return
+        }
+        
+        print("Host device: Creating sphere at position: \(worldPosition)")
+        
+        // Ensure only one sphere exists - remove any existing sphere first
+        removeSphere()
+        
+        // Create an ARAnchor at the specified position
+        // Using ARAnchor ensures proper coordinate system alignment with ARKit
+        let arAnchor = ARAnchor(name: "sphereAnchor", transform: transform)
+        
+        // Store reference to ARAnchor for coordinate updates
+        self.sphereARAnchor = arAnchor
+        
+        // Add the ARAnchor to the session first - this ensures ARKit knows about it
+        arView.session.add(anchor: arAnchor)
+        
+        // Create AnchorEntity from the ARAnchor - this ensures proper coordinate alignment
+        // The AnchorEntity will be synchronized via SynchronizationComponent
+        let anchor = AnchorEntity(anchor: arAnchor)
+        
+        // Create a sphere mesh with a visible size (radius reduced by half)
+        let sphereMesh = MeshResource.generateSphere(radius: 0.05)
+        
+        // Create blue material (will be updated by updateSphereColor)
+        var material = SimpleMaterial()
+        material.color = .init(tint: .blue, texture: nil)
+        
+        // Create model entity with sphere
+        let sphere = ModelEntity(mesh: sphereMesh, materials: [material])
+        
+        // Add SynchronizationComponent to BOTH the anchor AND the entity
+        // This ensures both the anchor's position and the entity are synchronized
+        // The anchor's position changes (when moving the sphere) will now sync to clients
+        // Set ownership transfer mode to ensure proper synchronization
+        var anchorSync = SynchronizationComponent()
+        anchorSync.ownershipTransferMode = .autoAccept
+        anchor.components[SynchronizationComponent.self] = anchorSync
+        
+        var sphereSync = SynchronizationComponent()
+        sphereSync.ownershipTransferMode = .autoAccept
+        sphere.components[SynchronizationComponent.self] = sphereSync
+        
+        // Add child first, then add anchor to scene
+        // This ensures proper synchronization setup
+        anchor.addChild(sphere)
+        arView.scene.addAnchor(anchor)
+        
+        // Ensure synchronization is properly initialized
+        // The anchor position will be synchronized automatically via SynchronizationComponent
+        
+        self.sphereAnchor = anchor
+        self.sphereEntity = sphere
+        self.isSphereSynchronized = false // Host creates it, so it's not "synchronized from" anywhere
+        
+        print("Host: Sphere created at position: \(worldPosition) with SynchronizationComponent")
+        DispatchQueue.main.async {
+            self.statusMessage = "Sphere placed at tapped location"
+        }
+        updateSphereColor()
+    }
+    
     private func setupSphere() {
         // Only host creates the sphere - it will be synced to clients via SynchronizationService
         guard isHostMode else {
             print("Client device: Not creating sphere (will receive from host via sync)")
+            return
+        }
+        
+        // Don't create sphere if it already exists (user may have placed it manually)
+        if sphereAnchor != nil && sphereEntity != nil {
+            print("Host: Sphere already exists, skipping automatic creation at origin")
+            // Just ensure synchronization components are properly set
+            updateSphereColor()
             return
         }
         
