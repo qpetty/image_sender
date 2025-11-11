@@ -764,13 +764,33 @@ class ARSessionManager: NSObject, ObservableObject {
         }
         
         DispatchQueue.global(qos: .userInitiated).async {
+            // Get current interface orientation
+            let interfaceOrientation = self.getInterfaceOrientation()
+            
             // Extract camera intrinsics
             let camera = currentFrame.camera
+            let pixelBuffer = currentFrame.capturedImage
+            
+            // Get raw image dimensions from pixel buffer
+            let rawWidth = CVPixelBufferGetWidth(pixelBuffer)
+            let rawHeight = CVPixelBufferGetHeight(pixelBuffer)
+            
+            // Get UIImage orientation based on interface orientation
+            let imageOrientation = self.getImageOrientation(for: interfaceOrientation)
+            
+            // Transform intrinsics based on orientation
             let intrinsics = camera.intrinsics
+            let (adjustedIntrinsics, finalWidth, finalHeight) = self.adjustIntrinsicsForOrientation(
+                intrinsics: intrinsics,
+                imageWidth: rawWidth,
+                imageHeight: rawHeight,
+                orientation: interfaceOrientation
+            )
+            
             let intrinsicsArray = [
-                intrinsics[0][0], intrinsics[0][1], intrinsics[0][2],
-                intrinsics[1][0], intrinsics[1][1], intrinsics[1][2],
-                intrinsics[2][0], intrinsics[2][1], intrinsics[2][2]
+                adjustedIntrinsics[0][0], adjustedIntrinsics[0][1], adjustedIntrinsics[0][2],
+                adjustedIntrinsics[1][0], adjustedIntrinsics[1][1], adjustedIntrinsics[1][2],
+                adjustedIntrinsics[2][0], adjustedIntrinsics[2][1], adjustedIntrinsics[2][2]
             ]
             
             // Calculate camera to sphere extrinsics
@@ -793,26 +813,22 @@ class ARSessionManager: NSObject, ObservableObject {
                 }
             }
             
-            // Convert captured image to JPEG
-            let pixelBuffer = currentFrame.capturedImage
-            guard let imageData = self.pixelBufferToJPEG(pixelBuffer: pixelBuffer) else {
+            // Convert captured image to JPEG with correct orientation
+            guard let imageData = self.pixelBufferToJPEG(pixelBuffer: pixelBuffer, orientation: imageOrientation) else {
                 DispatchQueue.main.async {
                     self.statusMessage = "Failed to convert image to JPEG"
                 }
                 return
             }
             
-            // Get image dimensions
-            let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
-            let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
-            
-            // Create metadata dictionary
+            // Create metadata dictionary with adjusted dimensions and intrinsics
             let metadata: [String: Any] = [
                 "intrinsics": intrinsicsArray,
                 "extrinsics": extrinsicsArray,
                 "image_size": imageData.count,
-                "image_width": imageWidth,
-                "image_height": imageHeight
+                "image_width": finalWidth,
+                "image_height": finalHeight,
+                "orientation": self.orientationToString(interfaceOrientation)
             ]
             
             // Send to server
@@ -820,7 +836,112 @@ class ARSessionManager: NSObject, ObservableObject {
         }
     }
     
-    private func pixelBufferToJPEG(pixelBuffer: CVPixelBuffer) -> Data? {
+    // Get current interface orientation
+    private func getInterfaceOrientation() -> UIInterfaceOrientation {
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
+            return windowScene.interfaceOrientation
+        }
+        // Fallback to device orientation
+        let deviceOrientation = UIDevice.current.orientation
+        switch deviceOrientation {
+        case .portrait:
+            return .portrait
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .landscapeLeft:
+            return .landscapeLeft
+        case .landscapeRight:
+            return .landscapeRight
+        default:
+            return .portrait // Default fallback
+        }
+    }
+    
+    // Convert interface orientation to UIImage orientation
+    private func getImageOrientation(for interfaceOrientation: UIInterfaceOrientation) -> UIImage.Orientation {
+        switch interfaceOrientation {
+        case .portrait:
+            return .right // Camera image needs to be rotated 90° clockwise for portrait
+        case .portraitUpsideDown:
+            return .left // Camera image needs to be rotated 90° counter-clockwise
+        case .landscapeLeft:
+            return .down // Camera image is already in landscape left orientation
+        case .landscapeRight:
+            return .up // Camera image needs to be rotated 180°
+        default:
+            return .right // Default to portrait orientation
+        }
+    }
+    
+    // Adjust camera intrinsics matrix based on image orientation
+    // ARKit's camera image pixel buffer is typically in landscape orientation (width > height)
+    // The intrinsics need to be transformed to match the final oriented image
+    private func adjustIntrinsicsForOrientation(
+        intrinsics: simd_float3x3,
+        imageWidth: Int,
+        imageHeight: Int,
+        orientation: UIInterfaceOrientation
+    ) -> (simd_float3x3, Int, Int) {
+        var adjustedIntrinsics = intrinsics
+        var finalWidth = imageWidth / 2
+        var finalHeight = imageHeight / 2
+        
+        // Extract intrinsic parameters
+        let fx = intrinsics[0][0]  // Focal length in x
+        let fy = intrinsics[1][1]  // Focal length in y
+        let cx = intrinsics[0][2]  // Principal point x
+        let cy = intrinsics[1][2]  // Principal point y
+        
+        // ARKit's pixel buffer is typically in landscape (width > height)
+        // We need to transform intrinsics based on how the image will be displayed
+        switch orientation {
+        case .portrait, .portraitUpsideDown:
+            // Portrait mode: image rotated 90° clockwise
+            // Dimensions swap: width becomes height, height becomes width
+            finalWidth = imageHeight
+            finalHeight = imageWidth
+            adjustedIntrinsics = simd_float3x3(
+                simd_float3(fx, 0, Float(finalWidth) - cx),
+                simd_float3(0, fy, Float(finalHeight) - cy),
+                simd_float3(0, 0, 1)
+            )
+        case .landscapeRight, .landscapeLeft:
+            // Landscape right: image rotated 180°
+            // Dimensions stay the same, but principal point flips
+            finalWidth = imageWidth
+            finalHeight = imageHeight
+            adjustedIntrinsics = simd_float3x3(
+                simd_float3(fx, 0, Float(finalWidth) - cx),
+                simd_float3(0, fy, Float(finalHeight) - cy),
+                simd_float3(0, 0, 1)
+            )
+        default:
+            // Unknown orientation: use original intrinsics
+            adjustedIntrinsics = intrinsics
+            finalWidth = imageWidth
+            finalHeight = imageHeight
+        }
+        
+        return (adjustedIntrinsics, finalWidth, finalHeight)
+    }
+    
+    // Convert orientation to string for metadata
+    private func orientationToString(_ orientation: UIInterfaceOrientation) -> String {
+        switch orientation {
+        case .portrait:
+            return "portrait"
+        case .portraitUpsideDown:
+            return "portraitUpsideDown"
+        case .landscapeLeft:
+            return "landscapeLeft"
+        case .landscapeRight:
+            return "landscapeRight"
+        default:
+            return "unknown"
+        }
+    }
+    
+    private func pixelBufferToJPEG(pixelBuffer: CVPixelBuffer, orientation: UIImage.Orientation) -> Data? {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
         
@@ -828,7 +949,8 @@ class ARSessionManager: NSObject, ObservableObject {
             return nil
         }
         
-        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right) // ARKit images are rotated
+        // Use the provided orientation instead of hardcoded .right
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
         guard let jpegData = uiImage.jpegData(compressionQuality: 0.8) else {
             return nil
         }
