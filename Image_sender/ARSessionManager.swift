@@ -847,28 +847,38 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                 scaledIntrinsics[2][0], scaledIntrinsics[2][1], scaledIntrinsics[2][2]
             ]
             
+            // Convert from ARKit camera axes (+X right, +Y up, +Z backward)
+            // to OpenCV camera axes (+X right, +Y down, +Z forward)
+            
+            // Define the coordinate flip matrix F (ARKit world/camera to OpenCV)
+            let F = float4x4(
+                columns: (
+                    simd_float4(1,  0,  0, 0),  // X unchanged
+                    simd_float4(0, -1,  0, 0),  // Y flip
+                    simd_float4(0,  0, -1, 0),  // Z flip
+                    simd_float4(0,  0,  0, 1)
+                )
+            )
+
+            // Function to convert an ARKit transform to OpenCV convention
+            func convertToOpenCV(_ transform: simd_float4x4) -> simd_float4x4 {
+                return F * transform * F
+            }
+            
             // Calculate camera to sphere extrinsics
             // Camera transform in world coordinates
             let cameraTransform = camera.transform
-            
             // Sphere transform in world coordinates
             let sphereTransform = sphereARAnchor.transform
             
+            // Convert both to OpenCV world space
+            let cameraTransformOCV = convertToOpenCV(cameraTransform)
+            let sphereTransformOCV = convertToOpenCV(sphereTransform)
+            
             // Calculate relative transform: camera to sphere
             // T_camera_to_sphere = T_sphere^-1 * T_camera
-            let sphereTransformInverse = sphereTransform.inverse
-            var cameraToSphereTransform = sphereTransformInverse * cameraTransform
-            
-            // Convert from ARKit camera axes (+X right, +Y up, +Z backward)
-            // to OpenCV camera axes (+X right, +Y down, +Z forward)
-            cameraToSphereTransform.columns.1 = -cameraToSphereTransform.columns.1
-            cameraToSphereTransform.columns.2 = -cameraToSphereTransform.columns.2
-            
-//            let axis = simd_float3(0, 1, 0)
-//            let angle = Float.pi  // 180 degrees in radians
-//            let quat = simd_quatf(angle: angle, axis: axis)
-//            let zRotation = simd_float4x4(quat)
-//            cameraToSphereTransform = cameraToSphereTransform * zRotation
+            let sphereTransformInverseOCV = sphereTransformOCV.inverse
+            let cameraToSphereTransform = sphereTransformInverseOCV * cameraTransformOCV
             
             print("Camera to Sphere Transform Matrix:")
             for row in 0..<4 {
