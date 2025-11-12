@@ -13,7 +13,7 @@ os.makedirs(RECEIVED_DIR, exist_ok=True)
 # Track frame numbers per client
 frame_counters = {}
 
-def process_camera_data(metadata, image_data, client_addr):
+def process_camera_data(metadata, image_data, depth_data, client_addr):
     """Process and display camera intrinsics and extrinsics."""
     print("\n" + "="*60)
     print(f"Received AR Frame Data from {client_addr}")
@@ -68,6 +68,46 @@ def process_camera_data(metadata, image_data, client_addr):
     print(f"\nImage size: {len(image_data)} bytes")
     if 'image_width' in metadata and 'image_height' in metadata:
         print(f"Image dimensions: {metadata['image_width']}x{metadata['image_height']}")
+
+    depth_info = metadata.get('depth_info') or metadata.get('depth')
+    if depth_data:
+        print("\nDepth Map:")
+        print(f"  Size: {len(depth_data)} bytes")
+        if isinstance(depth_info, dict):
+            width = depth_info.get('width')
+            height = depth_info.get('height')
+            bytes_per_row = depth_info.get('bytes_per_row')
+            pixel_format = depth_info.get('pixel_format', 'unknown')
+            units = depth_info.get('units', 'meters')
+            depth_type = depth_info.get('type', 'sceneDepth')
+            print(f"  Type: {depth_type}")
+            if width and height:
+                print(f"  Dimensions: {width}x{height} (bytes/row: {bytes_per_row})")
+            print(f"  Format: {pixel_format} | Units: {units}")
+            if 'confidence_available' in depth_info:
+                print(f"  Confidence map available: {depth_info['confidence_available']}")
+
+            try:
+                if width and height:
+                    bytes_per_element = depth_info.get('bytes_per_element', 4)
+                    expected_elements = width * height
+                    expected_size = expected_elements * bytes_per_element
+
+                    if len(depth_data) >= expected_size:
+                        depth_array = np.frombuffer(depth_data, dtype=np.float32, count=expected_elements)
+                        depth_array = depth_array.reshape((height, width))
+                        finite_depth = depth_array[np.isfinite(depth_array)]
+                        if finite_depth.size > 0:
+                            print(f"  Depth range: {float(finite_depth.min()):.3f}m - {float(finite_depth.max()):.3f}m")
+                            print(f"  Depth mean: {float(finite_depth.mean()):.3f}m")
+                    else:
+                        print(f"  Warning: Depth data size ({len(depth_data)}) smaller than expected ({expected_size})")
+            except Exception as exc:
+                print(f"  Failed to compute depth statistics: {exc}")
+        else:
+            print("  Depth metadata unavailable; skipping detailed analysis")
+    else:
+        print("\nDepth Map: not provided")
     
     print("="*60 + "\n")
 
@@ -93,6 +133,13 @@ def upload_frame():
             return jsonify({"status": "error", "message": "Empty image file"}), 400
         
         image_data = image_file.read()
+        depth_file = request.files.get('depth')
+        depth_data = None
+
+        if depth_file and depth_file.filename:
+            depth_data = depth_file.read()
+            if not depth_data:
+                depth_data = None
         
         # Get or increment frame number for this client
         if client_id not in frame_counters:
@@ -108,19 +155,36 @@ def upload_frame():
         with open(image_filename, 'wb') as f:
             f.write(image_data)
         print(f"[{client_id}] Saved image: {image_filename}")
+
+        depth_filename = None
+        if depth_data is not None:
+            depth_filename = f'{RECEIVED_DIR}/frame_{frame_number:04d}_{timestamp}_depth.bin'
+            with open(depth_filename, 'wb') as f:
+                f.write(depth_data)
+            print(f"[{client_id}] Saved depth map: {depth_filename}")
         
-        # Save metadata
+        # Save metadata (include saved file references)
+        metadata_to_save = dict(metadata)
+        server_info = metadata_to_save.get("_server")
+        if not isinstance(server_info, dict):
+            server_info = {}
+        server_info["image_file"] = os.path.basename(image_filename)
+        if depth_filename:
+            server_info["depth_file"] = os.path.basename(depth_filename)
+        metadata_to_save["_server"] = server_info
+
         metadata_filename = f'{RECEIVED_DIR}/frame_{frame_number:04d}_{timestamp}_metadata.json'
         with open(metadata_filename, 'w') as f:
-            json.dump(metadata, f, indent=2)
+            json.dump(metadata_to_save, f, indent=2)
         print(f"[{client_id}] Saved metadata: {metadata_filename}")
         
         # Process and display camera data
-        process_camera_data(metadata, image_data, client_id)
+        process_camera_data(metadata_to_save, image_data, depth_data, client_id)
         
         return jsonify({
             "status": "received",
             "frame": frame_number,
+            "depth_saved": depth_filename is not None,
             "message": "Frame uploaded successfully"
         })
         

@@ -425,6 +425,15 @@ class ARSessionManager: NSObject, ObservableObject {
         
         // Set up collaborative session
         config.isCollaborationEnabled = true
+
+        if #available(iOS 13.4, *) {
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                config.frameSemantics.insert(.sceneDepth)
+            }
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+                config.frameSemantics.insert(.smoothedSceneDepth)
+            }
+        }
         
         // Run session with reset to ensure clean state
         arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
@@ -736,6 +745,15 @@ class ARSessionManager: NSObject, ObservableObject {
         config.isCollaborationEnabled = true
         config.initialWorldMap = worldMap
         config.worldAlignment = .gravity
+
+        if #available(iOS 13.4, *) {
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+                config.frameSemantics.insert(.sceneDepth)
+            }
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+                config.frameSemantics.insert(.smoothedSceneDepth)
+            }
+        }
         
         arView?.session.run(config, options: [.resetTracking, .removeExistingAnchors])
         statusMessage = "Receiving world map - waiting for relocalization..."
@@ -770,6 +788,27 @@ class ARSessionManager: NSObject, ObservableObject {
             // Extract camera intrinsics
             let camera = currentFrame.camera
             let pixelBuffer = currentFrame.capturedImage
+
+            var depthPayload: Data?
+            var depthInfo: [String: Any]?
+
+            if #available(iOS 13.4, *), let depthData = (currentFrame.smoothedSceneDepth ?? currentFrame.sceneDepth) {
+                if let depthResult = self.depthBufferToData(pixelBuffer: depthData.depthMap) {
+                    depthPayload = depthResult.data
+                    depthInfo = [
+                        "type": currentFrame.smoothedSceneDepth != nil ? "smoothedSceneDepth" : "sceneDepth",
+                        "width": depthResult.width,
+                        "height": depthResult.height,
+                        "bytes_per_row": depthResult.bytesPerRow,
+                        "bytes_per_element": depthResult.bytesPerElement,
+                        "data_size": depthResult.data.count,
+                        "pixel_format": self.pixelFormatDescription(for: depthData.depthMap),
+                        "units": "meters",
+                        "timestamp": currentFrame.timestamp,
+                        "confidence_available": depthData.confidenceMap != nil
+                    ]
+                }
+            }
             
             // Get raw image dimensions from pixel buffer
             let rawWidth = CVPixelBufferGetWidth(pixelBuffer)
@@ -803,7 +842,7 @@ class ARSessionManager: NSObject, ObservableObject {
             // Calculate relative transform: camera to sphere
             // T_camera_to_sphere = T_sphere^-1 * T_camera
             let sphereTransformInverse = sphereTransform.inverse
-            let cameraToSphereTransform = sphereTransformInverse * cameraTransform
+            var cameraToSphereTransform = sphereTransformInverse * cameraTransform
             
             // Convert to array (column-major order)
             var extrinsicsArray: [Float] = []
@@ -822,17 +861,22 @@ class ARSessionManager: NSObject, ObservableObject {
             }
             
             // Create metadata dictionary with adjusted dimensions and intrinsics
-            let metadata: [String: Any] = [
+            var metadata: [String: Any] = [
                 "intrinsics": intrinsicsArray,
                 "extrinsics": extrinsicsArray,
                 "image_size": imageData.count,
                 "image_width": finalWidth,
                 "image_height": finalHeight,
-                "orientation": self.orientationToString(interfaceOrientation)
+                "orientation": self.orientationToString(interfaceOrientation),
+                "depth_available": depthPayload != nil
             ]
+
+            if let depthInfo = depthInfo {
+                metadata["depth_info"] = depthInfo
+            }
             
             // Send to server
-            self.sendToServer(metadata: metadata, imageData: imageData)
+            self.sendToServer(metadata: metadata, imageData: imageData, depthData: depthPayload)
         }
     }
     
@@ -957,8 +1001,44 @@ class ARSessionManager: NSObject, ObservableObject {
         
         return jpegData
     }
+
+    private func depthBufferToData(pixelBuffer: CVPixelBuffer) -> (data: Data, width: Int, height: Int, bytesPerRow: Int, bytesPerElement: Int)? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+            return nil
+        }
+
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let bytesPerElement = MemoryLayout<Float32>.size
+        let dataSize = bytesPerRow * height
+
+        let data = Data(bytes: baseAddress, count: dataSize)
+
+        return (data, width, height, bytesPerRow, bytesPerElement)
+    }
+
+    private func pixelFormatDescription(for pixelBuffer: CVPixelBuffer) -> String {
+        let pixelFormat = CVPixelBufferGetPixelFormatType(pixelBuffer)
+
+        switch pixelFormat {
+        case kCVPixelFormatType_DisparityFloat16:
+            return "DisparityFloat16"
+        case kCVPixelFormatType_DisparityFloat32:
+            return "DisparityFloat32"
+        case kCVPixelFormatType_DepthFloat16:
+            return "DepthFloat16"
+        case kCVPixelFormatType_DepthFloat32:
+            return "DepthFloat32"
+        default:
+            return "Unknown(\(pixelFormat))"
+        }
+    }
     
-    private func sendToServer(metadata: [String: Any], imageData: Data) {
+    private func sendToServer(metadata: [String: Any], imageData: Data, depthData: Data? = nil) {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: metadata) else {
             DispatchQueue.main.async {
                 self.statusMessage = "Failed to serialize metadata"
@@ -996,6 +1076,15 @@ class ARSessionManager: NSObject, ObservableObject {
         body.append("Content-Disposition: form-data; name=\"image\"; filename=\"frame.jpg\"\r\n".data(using: .utf8)!)
         body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
         body.append(imageData)
+
+        if let depthData = depthData {
+            body.append("\r\n".data(using: .utf8)!)
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"depth\"; filename=\"depth.bin\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
+            body.append(depthData)
+        }
+
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
         
         request.httpBody = body
