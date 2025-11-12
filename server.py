@@ -165,6 +165,15 @@ def upload_frame():
         
         # Save metadata (include saved file references)
         metadata_to_save = dict(metadata)
+        extrinsics = metadata_to_save.get("extrinsics")
+        if isinstance(extrinsics, list):
+            try:
+                extrinsics_matrix = np.array(extrinsics).reshape(4, 4)
+                print("update extrinsics before saving")
+                metadata_to_save["extrinsics"] = extrinsics_matrix.flatten(order='F').tolist()
+            except ValueError:
+                # Leave as-is if the list cannot be reshaped (unexpected length)
+                pass
         server_info = metadata_to_save.get("_server")
         if not isinstance(server_info, dict):
             server_info = {}

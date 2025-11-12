@@ -39,6 +39,7 @@ class ARSessionManager: NSObject, ObservableObject {
     // Server configuration
     private let serverIP = "192.168.4.21"
     private let serverPort: UInt16 = 8080
+    private let targetImageSize = CGSize(width: 960, height: 512)
     
     // Multipeer Connectivity
     // Service type must be 1-15 characters, alphanumeric and hyphens only
@@ -819,17 +820,26 @@ class ARSessionManager: NSObject, ObservableObject {
             
             // Transform intrinsics based on orientation
             let intrinsics = camera.intrinsics
-            let (adjustedIntrinsics, finalWidth, finalHeight) = self.adjustIntrinsicsForOrientation(
+            let (adjustedIntrinsics, originalWidth, originalHeight) = self.adjustIntrinsicsForOrientation(
                 intrinsics: intrinsics,
                 imageWidth: rawWidth,
                 imageHeight: rawHeight,
                 orientation: interfaceOrientation
             )
+            let targetWidth = Int(self.targetImageSize.width)
+            let targetHeight = Int(self.targetImageSize.height)
+            let scaledIntrinsics = self.scaleIntrinsics(
+                adjustedIntrinsics,
+                fromWidth: originalWidth,
+                fromHeight: originalHeight,
+                toWidth: targetWidth,
+                toHeight: targetHeight
+            )
             
             let intrinsicsArray = [
-                adjustedIntrinsics[0][0], adjustedIntrinsics[0][1], adjustedIntrinsics[0][2],
-                adjustedIntrinsics[1][0], adjustedIntrinsics[1][1], adjustedIntrinsics[1][2],
-                adjustedIntrinsics[2][0], adjustedIntrinsics[2][1], adjustedIntrinsics[2][2]
+                scaledIntrinsics[0][0], scaledIntrinsics[0][1], scaledIntrinsics[0][2],
+                scaledIntrinsics[1][0], scaledIntrinsics[1][1], scaledIntrinsics[1][2],
+                scaledIntrinsics[2][0], scaledIntrinsics[2][1], scaledIntrinsics[2][2]
             ]
             
             // Calculate camera to sphere extrinsics
@@ -844,18 +854,38 @@ class ARSessionManager: NSObject, ObservableObject {
             let sphereTransformInverse = sphereTransform.inverse
             var cameraToSphereTransform = sphereTransformInverse * cameraTransform
             
-            // Convert to array (column-major order)
+            // Convert from ARKit camera axes (+X right, +Y up, +Z backward)
+            // to OpenCV camera axes (+X right, +Y down, +Z forward)
+            cameraToSphereTransform.columns.1 = -cameraToSphereTransform.columns.1
+            cameraToSphereTransform.columns.2 = -cameraToSphereTransform.columns.2
+            
+//            let axis = simd_float3(0, 1, 0)
+//            let angle = Float.pi  // 180 degrees in radians
+//            let quat = simd_quatf(angle: angle, axis: axis)
+//            let zRotation = simd_float4x4(quat)
+//            cameraToSphereTransform = cameraToSphereTransform * zRotation
+            
+            print("Camera to Sphere Transform Matrix:")
+            for row in 0..<4 {
+                var rowString = ""
+                for col in 0..<4 {
+                    rowString += String(format: "%.6f ", cameraToSphereTransform[row, col])
+                }
+                print(rowString.trimmingCharacters(in: .whitespaces))
+            }
+            
+            // Convert to array (row-major order)
             var extrinsicsArray: [Float] = []
-            for col in 0..<4 {
-                for row in 0..<4 {
+            for row in 0..<4 {
+                for col in 0..<4 {
                     extrinsicsArray.append(cameraToSphereTransform[row][col])
                 }
             }
             
-            // Convert captured image to JPEG with correct orientation
-            guard let imageData = self.pixelBufferToJPEG(pixelBuffer: pixelBuffer, orientation: imageOrientation) else {
+            // Convert captured image to PNG with correct orientation and size
+            guard let imageData = self.pixelBufferToPNG(pixelBuffer: pixelBuffer, orientation: imageOrientation) else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Failed to convert image to JPEG"
+                    self.statusMessage = "Failed to convert image to PNG"
                 }
                 return
             }
@@ -865,8 +895,8 @@ class ARSessionManager: NSObject, ObservableObject {
                 "intrinsics": intrinsicsArray,
                 "extrinsics": extrinsicsArray,
                 "image_size": imageData.count,
-                "image_width": finalWidth,
-                "image_height": finalHeight,
+                "image_width": targetWidth,
+                "image_height": targetHeight,
                 "orientation": self.orientationToString(interfaceOrientation),
                 "depth_available": depthPayload != nil
             ]
@@ -939,34 +969,57 @@ class ARSessionManager: NSObject, ObservableObject {
         // ARKit's pixel buffer is typically in landscape (width > height)
         // We need to transform intrinsics based on how the image will be displayed
         switch orientation {
-        case .portrait, .portraitUpsideDown:
-            // Portrait mode: image rotated 90° clockwise
-            // Dimensions swap: width becomes height, height becomes width
-            finalWidth = imageHeight / 2
-            finalHeight = imageWidth / 2
-            adjustedIntrinsics = simd_float3x3(
-                simd_float3(fx, 0, Float(finalWidth) - cx),
-                simd_float3(0, fy, Float(finalHeight) - cy),
-                simd_float3(0, 0, 1)
-            )
+//        case .portrait, .portraitUpsideDown:
+//            // Portrait mode: image rotated 90° clockwise
+//            // Dimensions swap: width becomes height, height becomes width
+//            finalWidth = imageHeight
+//            finalHeight = imageWidth
+//            adjustedIntrinsics = simd_float3x3(
+//                simd_float3(fx, 0, Float(finalWidth) - cx),
+//                simd_float3(0, fy, Float(finalHeight) - cy),
+//                simd_float3(0, 0, 1)
+//            )
         case .landscapeRight, .landscapeLeft:
             // Landscape right: image rotated 180°
             // Dimensions stay the same, but principal point flips
-            finalWidth = imageWidth / 2
-            finalHeight = imageHeight / 2
+            finalWidth = imageWidth
+            finalHeight = imageHeight
             adjustedIntrinsics = simd_float3x3(
-                simd_float3(fx, 0, Float(finalWidth) - cx),
-                simd_float3(0, fy, Float(finalHeight) - cy),
+                simd_float3(fx, 0, Float(finalWidth / 2) - cx),
+                simd_float3(0, fy, Float(finalHeight / 2) - cy),
                 simd_float3(0, 0, 1)
             )
         default:
             // Unknown orientation: use original intrinsics
             adjustedIntrinsics = intrinsics
-            finalWidth = imageWidth / 2
-            finalHeight = imageHeight / 2
+            finalWidth = imageWidth
+            finalHeight = imageHeight
         }
         
         return (adjustedIntrinsics, finalWidth, finalHeight)
+    }
+    
+    private func scaleIntrinsics(
+        _ intrinsics: simd_float3x3,
+        fromWidth: Int,
+        fromHeight: Int,
+        toWidth: Int,
+        toHeight: Int
+    ) -> simd_float3x3 {
+        guard fromWidth > 0, fromHeight > 0 else {
+            return intrinsics
+        }
+        
+        let scaleX = Float(toWidth) / Float(fromWidth)
+        let scaleY = Float(toHeight) / Float(fromHeight)
+        
+        var scaled = intrinsics
+        scaled[0][0] *= scaleX
+        scaled[0][2] *= scaleX
+        scaled[1][1] *= scaleY
+        scaled[1][2] *= scaleY
+        
+        return scaled
     }
     
     // Convert orientation to string for metadata
@@ -985,7 +1038,7 @@ class ARSessionManager: NSObject, ObservableObject {
         }
     }
     
-    private func pixelBufferToJPEG(pixelBuffer: CVPixelBuffer, orientation: UIImage.Orientation) -> Data? {
+    private func pixelBufferToPNG(pixelBuffer: CVPixelBuffer, orientation: UIImage.Orientation) -> Data? {
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         let context = CIContext()
         
@@ -995,11 +1048,22 @@ class ARSessionManager: NSObject, ObservableObject {
         
         // Use the provided orientation instead of hardcoded .right
         let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
-        guard let jpegData = uiImage.jpegData(compressionQuality: 0.8) else {
+        
+        guard let resizedImage = resizeImage(uiImage, targetSize: targetImageSize) else {
             return nil
         }
         
-        return jpegData
+        return resizedImage.pngData()
+    }
+    
+    private func resizeImage(_ image: UIImage, targetSize: CGSize) -> UIImage? {
+        let rendererFormat = UIGraphicsImageRendererFormat.default()
+        rendererFormat.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: rendererFormat)
+        
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
     }
 
     private func depthBufferToData(pixelBuffer: CVPixelBuffer) -> (data: Data, width: Int, height: Int, bytesPerRow: Int, bytesPerElement: Int)? {
@@ -1073,8 +1137,8 @@ class ARSessionManager: NSObject, ObservableObject {
         
         // Add image
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"frame.jpg\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"image\"; filename=\"frame.png\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/png\r\n\r\n".data(using: .utf8)!)
         body.append(imageData)
 
         if let depthData = depthData {
