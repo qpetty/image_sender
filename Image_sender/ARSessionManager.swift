@@ -13,7 +13,7 @@ import MultipeerConnectivity
 import UIKit
 import CoreImage
 
-class ARSessionManager: NSObject, ObservableObject {
+class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     @Published var isSessionRunning = false
     @Published var isHostMode = false
     @Published var isClientMode = false
@@ -41,6 +41,8 @@ class ARSessionManager: NSObject, ObservableObject {
     private let serverPort: UInt16 = 8080
     private let targetImageSize = CGSize(width: 960, height: 512)
     
+    private var serverSession : URLSession?
+    
     // Multipeer Connectivity
     // Service type must be 1-15 characters, alphanumeric and hyphens only
     // Must match the NSBonjourServices entry in Info.plist (without the _ and .tcp suffix)
@@ -58,6 +60,8 @@ class ARSessionManager: NSObject, ObservableObject {
         multipeerSession = MCSession(peer: myPeerID, securityIdentity: nil, encryptionPreference: .required)
         
         super.init()
+        
+        serverSession = URLSession(configuration: .background(withIdentifier: "image_upload"), delegate: self, delegateQueue: .main)
         
         multipeerSession.delegate = self
     }
@@ -782,22 +786,23 @@ class ARSessionManager: NSObject, ObservableObject {
             return
         }
         
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Get current interface orientation
-            let interfaceOrientation = self.getInterfaceOrientation()
+        let interfaceOrientation = self.getInterfaceOrientation()
+        let capturedFrame = currentFrame
+        
+        DispatchQueue.global(qos: .background).async {
             
             // Extract camera intrinsics
-            let camera = currentFrame.camera
-            let pixelBuffer = currentFrame.capturedImage
+            let camera = capturedFrame.camera
+            let pixelBuffer = capturedFrame.capturedImage
 
             var depthPayload: Data?
             var depthInfo: [String: Any]?
 
-            if #available(iOS 13.4, *), let depthData = (currentFrame.smoothedSceneDepth ?? currentFrame.sceneDepth) {
+            if #available(iOS 13.4, *), let depthData = (capturedFrame.smoothedSceneDepth ?? capturedFrame.sceneDepth) {
                 if let depthResult = self.depthBufferToData(pixelBuffer: depthData.depthMap) {
                     depthPayload = depthResult.data
                     depthInfo = [
-                        "type": currentFrame.smoothedSceneDepth != nil ? "smoothedSceneDepth" : "sceneDepth",
+                        "type": capturedFrame.smoothedSceneDepth != nil ? "smoothedSceneDepth" : "sceneDepth",
                         "width": depthResult.width,
                         "height": depthResult.height,
                         "bytes_per_row": depthResult.bytesPerRow,
@@ -805,7 +810,7 @@ class ARSessionManager: NSObject, ObservableObject {
                         "data_size": depthResult.data.count,
                         "pixel_format": self.pixelFormatDescription(for: depthData.depthMap),
                         "units": "meters",
-                        "timestamp": currentFrame.timestamp,
+                        "timestamp": capturedFrame.timestamp,
                         "confidence_available": depthData.confidenceMap != nil
                     ]
                 }
@@ -1154,47 +1159,17 @@ class ARSessionManager: NSObject, ObservableObject {
         request.httpBody = body
         request.setValue("\(body.count)", forHTTPHeaderField: "Content-Length")
         
-        // Send request
-        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            guard let self = self else { return }
+//        let session = URLSession(configuration: .background(withIdentifier: "image_upload"), delegate: self, delegateQueue: .main)
+        if let serverSession = self.serverSession {
+            let task = serverSession.dataTask(with: request)
             
-            if let error = error {
-                print("Error sending frame: \(error.localizedDescription)")
-                DispatchQueue.main.async {
-                    self.statusMessage = "Failed to send: \(error.localizedDescription)"
-                }
-                return
-            }
-            
-            guard let httpResponse = response as? HTTPURLResponse else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Invalid server response"
-                }
-                return
-            }
-            
-            if httpResponse.statusCode == 200 {
-                if let data = data,
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let status = json["status"] as? String, status == "received" {
-                    DispatchQueue.main.async {
-                        self.statusMessage = "Frame sent to server successfully"
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self.statusMessage = "Frame sent (response received)"
-                    }
-                }
-            } else {
-                let errorMessage = String(data: data ?? Data(), encoding: .utf8) ?? "Unknown error"
-                print("Server error: \(httpResponse.statusCode) - \(errorMessage)")
-                DispatchQueue.main.async {
-                    self.statusMessage = "Server error: \(httpResponse.statusCode)"
-                }
-            }
+            task.resume()
         }
-        
-        task.resume()
+    }
+    
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+        self.statusMessage = "Server error: \(error)"
+        print("Server error: \(self.statusMessage)")
     }
 }
 
