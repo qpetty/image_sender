@@ -20,6 +20,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     @Published var connectedPeers: [MCPeerID] = []
     @Published var statusMessage = "Ready to start AR session"
     @Published var isSynchronized = false
+    @Published var webSocketStatus: WebSocketConnectionStatus = .disconnected
+    @Published var lastRemoteTrigger: Date?
     
     private var arView: ARView?
     private var arSession: ARSession? {
@@ -43,6 +45,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     
     private var serverSession : URLSession?
     
+    // WebSocket manager for remote triggering
+    private var webSocketManager: WebSocketManager?
+    
     // Multipeer Connectivity
     // Service type must be 1-15 characters, alphanumeric and hyphens only
     // Must match the NSBonjourServices entry in Info.plist (without the _ and .tcp suffix)
@@ -64,6 +69,26 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         serverSession = URLSession(configuration: .background(withIdentifier: "image_upload"), delegate: self, delegateQueue: .main)
         
         multipeerSession.delegate = self
+        
+        // Initialize WebSocket manager
+        webSocketManager = WebSocketManager(serverIP: serverIP, serverPort: serverPort)
+        webSocketManager?.onCaptureTrigger = { [weak self] in
+            // Trigger frame capture when remote command is received
+            DispatchQueue.main.async {
+                self?.lastRemoteTrigger = Date()
+                self?.statusMessage = "Remote trigger received - capturing frame..."
+            }
+            self?.sendFrameToServer()
+        }
+        
+        // Observe WebSocket status changes
+        webSocketManager?.$connectionStatus
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$webSocketStatus)
+        
+        webSocketManager?.$lastTriggerReceived
+            .receive(on: DispatchQueue.main)
+            .assign(to: &$lastRemoteTrigger)
     }
     
     func setARView(_ view: ARView) {
@@ -452,6 +477,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         isSessionRunning = true
         statusMessage = "AR Session started"
         
+        // Connect WebSocket when AR session starts
+        webSocketManager?.connect()
+        
         // Host creates sphere when peers connect and world map is sent
         // Client receives sphere via SynchronizationService after world map alignment
         updateSphereColor()
@@ -464,6 +492,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         isSessionRunning = false
         sessionStartTime = nil
         statusMessage = "AR Session stopped"
+        
+        // Disconnect WebSocket when AR session stops
+        webSocketManager?.disconnect()
         
         // Remove sphere when session stops
         removeSphere()

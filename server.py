@@ -1,10 +1,14 @@
 from flask import Flask, request, jsonify
+from flask_socketio import SocketIO, emit, disconnect
 import json
 import numpy as np
 from datetime import datetime
 import os
+import threading
+import sys
 
 app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Create directory for received images
 RECEIVED_DIR = 'received_images'
@@ -12,6 +16,10 @@ os.makedirs(RECEIVED_DIR, exist_ok=True)
 
 # Track frame numbers per client
 frame_counters = {}
+
+# Track WebSocket connected clients
+connected_clients = set()
+last_trigger_time = None
 
 def process_camera_data(metadata, image_data, depth_data, client_addr):
     """Process and display camera intrinsics and extrinsics."""
@@ -211,12 +219,86 @@ def health():
     """Health check endpoint."""
     return jsonify({"status": "ok", "message": "Server is running"})
 
+# WebSocket event handlers
+@socketio.on('connect')
+def handle_connect():
+    """Handle WebSocket client connection."""
+    client_id = request.sid
+    connected_clients.add(client_id)
+    print(f"\n[WebSocket] Client connected: {client_id}")
+    print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
+    emit('connected', {'status': 'connected', 'client_id': client_id})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle WebSocket client disconnection."""
+    client_id = request.sid
+    connected_clients.discard(client_id)
+    print(f"\n[WebSocket] Client disconnected: {client_id}")
+    print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
+
+@socketio.on_error_default
+def default_error_handler(e):
+    """Handle Socket.IO errors."""
+    print(f"[WebSocket] Error: {e}")
+    import traceback
+    traceback.print_exc()
+
+@socketio.on('client_ready')
+def handle_client_ready(data):
+    """Handle client ready message."""
+    client_id = request.sid
+    device_name = data.get('device_name', 'Unknown')
+    print(f"[WebSocket] Client ready: {device_name} ({client_id})")
+    # Ensure client is in connected_clients set
+    if client_id not in connected_clients:
+        connected_clients.add(client_id)
+        print(f"[WebSocket] Added client to connected set: {client_id}")
+        print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
+
+def keyboard_input_thread():
+    """Background thread to listen for keyboard input and trigger captures."""
+    print("\n" + "="*60)
+    print("WebSocket Remote Trigger Active")
+    print("Press ENTER to trigger frame capture on all connected devices")
+    print("="*60 + "\n")
+    
+    while True:
+        try:
+            # Read a line from stdin (blocks until Enter is pressed)
+            line = sys.stdin.readline()
+            if line.strip() == '' or line.strip() == '\n':
+                # Enter key pressed
+                if len(connected_clients) > 0:
+                    global last_trigger_time
+                    last_trigger_time = datetime.now()
+                    print(f"\n[Trigger] Broadcasting capture_frame to {len(connected_clients)} client(s)...")
+                    socketio.emit('capture_frame', {'timestamp': last_trigger_time.isoformat()})
+                    print(f"[Trigger] Capture command sent at {last_trigger_time.strftime('%H:%M:%S')}")
+                else:
+                    print("\n[Trigger] No clients connected. Waiting for connections...")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[Keyboard] Stopping keyboard input thread...")
+            break
+        except Exception as e:
+            print(f"\n[Keyboard] Error in keyboard thread: {e}")
+            import traceback
+            traceback.print_exc()
+
 if __name__ == '__main__':
     print(f"Flask server starting on 0.0.0.0:8080")
+    print(f"WebSocket server starting on 0.0.0.0:8080")
     print(f"Images will be saved to: {os.path.abspath(RECEIVED_DIR)}")
     print(f"Supports multiple clients simultaneously")
     print(f"Endpoints:")
     print(f"  POST /upload_frame - Upload AR frame with image and metadata")
     print(f"  GET  /health - Health check")
+    print(f"  WebSocket /socket.io - WebSocket connection for remote triggering")
     print()
-    app.run(host='0.0.0.0', port=8080, threaded=True, debug=False)
+    
+    # Start keyboard input thread
+    keyboard_thread = threading.Thread(target=keyboard_input_thread, daemon=True)
+    keyboard_thread.start()
+    
+    # Run SocketIO server (which includes Flask)
+    socketio.run(app, host='0.0.0.0', port=8080, debug=False, allow_unsafe_werkzeug=True)

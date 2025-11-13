@@ -18,6 +18,33 @@ struct ContentView: View {
             
             // Control Panel
             VStack {
+                // WebSocket Status (top of screen)
+                VStack(spacing: 5) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(webSocketStatusColor(sessionManager.webSocketStatus))
+                            .frame(width: 10, height: 10)
+                        Text(webSocketStatusText(sessionManager.webSocketStatus))
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    
+                    if let lastTrigger = sessionManager.lastRemoteTrigger {
+                        Text("Last trigger: \(formatTime(lastTrigger))")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.8))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.6))
+                            .cornerRadius(6)
+                    }
+                }
+                .padding(.top, 10)
+                
                 Spacer()
                 
                 // Status Message
@@ -126,6 +153,39 @@ struct ContentView: View {
                 }
             }
         }
+    }
+    
+    // Helper functions for WebSocket status display
+    private func webSocketStatusColor(_ status: WebSocketConnectionStatus) -> Color {
+        switch status {
+        case .connected:
+            return .green
+        case .connecting:
+            return .yellow
+        case .disconnected:
+            return .red
+        case .error:
+            return .orange
+        }
+    }
+    
+    private func webSocketStatusText(_ status: WebSocketConnectionStatus) -> String {
+        switch status {
+        case .connected:
+            return "WebSocket: Connected"
+        case .connecting:
+            return "WebSocket: Connecting..."
+        case .disconnected:
+            return "WebSocket: Disconnected"
+        case .error(let message):
+            return "WebSocket: Error - \(message)"
+        }
+    }
+    
+    private func formatTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .medium
+        return formatter.string(from: date)
     }
 }
 
