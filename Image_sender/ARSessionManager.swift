@@ -969,7 +969,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                 "image_width": targetWidth,
                 "image_height": targetHeight,
                 "orientation": self.orientationToString(interfaceOrientation),
-                "depth_available": depthPayload != nil
+                "depth_available": depthPayload != nil,
+                "client_id": self.myPeerID.displayName
             ]
 
             if let depthInfo = depthInfo {

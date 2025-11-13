@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 import threading
 import sys
+import re
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -20,6 +21,10 @@ frame_counters = {}
 # Track WebSocket connected clients
 connected_clients = set()
 last_trigger_time = None
+
+# Map client IP addresses to WebSocket session IDs
+# Format: {ip_address: websocket_session_id}
+client_ip_to_session_id = {}
 
 def process_camera_data(metadata, image_data, depth_data, client_addr):
     """Process and display camera intrinsics and extrinsics."""
@@ -149,24 +154,43 @@ def upload_frame():
             if not depth_data:
                 depth_data = None
         
+        # Get WebSocket session ID from IP address mapping (this is the unique Socket.IO session ID)
+        websocket_session_id = client_ip_to_session_id.get(client_addr)
+        client_device_name = metadata.get("client_id", client_id)
+        
+        # Use WebSocket session ID if available, otherwise use device name
+        identifier_to_use = websocket_session_id if websocket_session_id else client_device_name
+        
+        # Sanitize client identifier for filesystem use (replace spaces and special chars with underscores)
+        sanitized_client_id = re.sub(r'[^\w\-_\.]', '_', identifier_to_use)
+        # Remove multiple consecutive underscores
+        sanitized_client_id = re.sub(r'_+', '_', sanitized_client_id)
+        # Remove leading/trailing underscores
+        sanitized_client_id = sanitized_client_id.strip('_')
+        # If empty after sanitization, use server client_id
+        if not sanitized_client_id:
+            sanitized_client_id = client_id.replace(':', '_')
+        
         # Get or increment frame number for this client
-        if client_id not in frame_counters:
-            frame_counters[client_id] = 0
-        frame_counters[client_id] += 1
-        frame_number = frame_counters[client_id]
+        # Use WebSocket session ID for tracking if available, otherwise use server client_id
+        tracking_id = websocket_session_id if websocket_session_id else client_id
+        if tracking_id not in frame_counters:
+            frame_counters[tracking_id] = 0
+        frame_counters[tracking_id] += 1
+        frame_number = frame_counters[tracking_id]
         
         # Generate timestamp
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        # Save image
-        image_filename = f'{RECEIVED_DIR}/frame_{frame_number:04d}_{timestamp}.jpg'
+        # Save image with client identifier in filename
+        image_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}.jpg'
         with open(image_filename, 'wb') as f:
             f.write(image_data)
         print(f"[{client_id}] Saved image: {image_filename}")
 
         depth_filename = None
         if depth_data is not None:
-            depth_filename = f'{RECEIVED_DIR}/frame_{frame_number:04d}_{timestamp}_depth.bin'
+            depth_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}_depth.bin'
             with open(depth_filename, 'wb') as f:
                 f.write(depth_data)
             print(f"[{client_id}] Saved depth map: {depth_filename}")
@@ -182,15 +206,19 @@ def upload_frame():
             except ValueError:
                 # Leave as-is if the list cannot be reshaped (unexpected length)
                 pass
+        
+        # Add server-side client identifier (IP:port) to metadata
+        # Client-provided identifier is already in metadata as "client_id"
         server_info = metadata_to_save.get("_server")
         if not isinstance(server_info, dict):
             server_info = {}
         server_info["image_file"] = os.path.basename(image_filename)
         if depth_filename:
             server_info["depth_file"] = os.path.basename(depth_filename)
+        server_info["server_client_id"] = client_id  # Server-generated identifier (IP:port)
         metadata_to_save["_server"] = server_info
 
-        metadata_filename = f'{RECEIVED_DIR}/frame_{frame_number:04d}_{timestamp}_metadata.json'
+        metadata_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}_metadata.json'
         with open(metadata_filename, 'w') as f:
             json.dump(metadata_to_save, f, indent=2)
         print(f"[{client_id}] Saved metadata: {metadata_filename}")
@@ -224,8 +252,11 @@ def health():
 def handle_connect():
     """Handle WebSocket client connection."""
     client_id = request.sid
+    client_ip = request.remote_addr
     connected_clients.add(client_id)
-    print(f"\n[WebSocket] Client connected: {client_id}")
+    # Map IP address to WebSocket session ID
+    client_ip_to_session_id[client_ip] = client_id
+    print(f"\n[WebSocket] Client connected: {client_id} (IP: {client_ip})")
     print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
     emit('connected', {'status': 'connected', 'client_id': client_id})
 
@@ -233,7 +264,11 @@ def handle_connect():
 def handle_disconnect():
     """Handle WebSocket client disconnection."""
     client_id = request.sid
+    client_ip = request.remote_addr
     connected_clients.discard(client_id)
+    # Remove IP mapping if it matches this session
+    if client_ip in client_ip_to_session_id and client_ip_to_session_id[client_ip] == client_id:
+        del client_ip_to_session_id[client_ip]
     print(f"\n[WebSocket] Client disconnected: {client_id}")
     print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
 
