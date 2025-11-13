@@ -227,6 +227,16 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                     self.sphereAnchor = anchorEntity
                     self.sphereEntity = modelEntity
                     self.isSphereSynchronized = true // Mark as synchronized so we don't remove it
+                    
+                    // IMPORTANT: Extract the ARAnchor so sendFrameToServer() can use it
+                    if let arAnchor = anchorEntity.anchorIdentifier {
+                        // Get the ARAnchor from the AR session
+                        if let anchor = arView.session.currentFrame?.anchors.first(where: { $0.identifier == arAnchor }) {
+                            self.sphereARAnchor = anchor
+                            print("Client: Extracted ARAnchor from synchronized sphere")
+                        }
+                    }
+                    
                     print("Client: Detected synchronized sphere anchor from host")
                     DispatchQueue.main.async {
                         self.statusMessage = "Sphere synchronized from host"
@@ -803,19 +813,24 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     
     // MARK: - Server Communication
     func sendFrameToServer() {
+        print("sendFrameToServer: Called")
         guard let arSession = arSession, let currentFrame = arSession.currentFrame else {
             DispatchQueue.main.async {
                 self.statusMessage = "No AR frame available"
             }
+            print("sendFrameToServer: No AR frame available")
             return
         }
         
-        guard let sphereARAnchor = sphereARAnchor else {
+        guard let sphereAnchor = sphereAnchor else {
             DispatchQueue.main.async {
                 self.statusMessage = "No sphere anchor found"
             }
+            print("sendFrameToServer: No sphere anchor available")
             return
         }
+        
+        print("sendFrameToServer: Got sphere anchor, proceeding with frame capture")
         
         let interfaceOrientation = self.getInterfaceOrientation()
         let capturedFrame = currentFrame
@@ -900,7 +915,17 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
             // Camera transform in world coordinates
             let cameraTransform = camera.transform
             // Sphere transform in world coordinates
-            let sphereTransform = sphereARAnchor.transform
+            // For host: use ARAnchor transform; for client: use AnchorEntity transform matrix
+            let sphereTransform: simd_float4x4
+            if let sphereARAnchor = self.sphereARAnchor {
+                // Host mode: use ARAnchor (more accurate as it's tracked by ARKit)
+                sphereTransform = sphereARAnchor.transform
+                print("Using ARAnchor transform (host mode)")
+            } else {
+                // Client mode: use synchronized AnchorEntity transform
+                sphereTransform = sphereAnchor.transform.matrix
+                print("Using AnchorEntity transform matrix (client mode)")
+            }
             
             // Convert both to OpenCV world space
             let cameraTransformOCV = convertToOpenCV(cameraTransform)

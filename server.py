@@ -272,8 +272,15 @@ def keyboard_input_thread():
                 if len(connected_clients) > 0:
                     global last_trigger_time
                     last_trigger_time = datetime.now()
+                    trigger_data = {'timestamp': last_trigger_time.isoformat()}
                     print(f"\n[Trigger] Broadcasting capture_frame to {len(connected_clients)} client(s)...")
-                    socketio.emit('capture_frame', {'timestamp': last_trigger_time.isoformat()})
+                    print(f"[Trigger] Connected clients: {list(connected_clients)}")
+                    # Emit to each connected client individually to ensure all receive it
+                    # This is more reliable than relying on broadcast behavior from background threads
+                    clients_list = list(connected_clients)  # Create a copy to avoid modification during iteration
+                    for client_id in clients_list:
+                        socketio.emit('capture_frame', trigger_data, to=client_id)
+                        print(f"[Trigger] Sent to client: {client_id}")
                     print(f"[Trigger] Capture command sent at {last_trigger_time.strftime('%H:%M:%S')}")
                 else:
                     print("\n[Trigger] No clients connected. Waiting for connections...")
