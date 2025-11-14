@@ -8,9 +8,19 @@ import threading
 import sys
 import re
 import requests
+import base64
 
 app = Flask(__name__)
-socketio = SocketIO(app, cors_allowed_origins="*")
+# Increase max_http_buffer_size to handle large base64-encoded images (default is 1MB)
+# Base64 encoding adds ~33% overhead, so 1MB image becomes ~1.3MB
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode='threading',
+    max_http_buffer_size=10 * 1024 * 1024,  # 10MB to handle large frames
+    ping_timeout=60,  # Increase timeout for large transfers
+    ping_interval=25
+)
 
 # Create directory for received images
 RECEIVED_DIR = 'received_images'
@@ -137,6 +147,158 @@ def process_camera_data(metadata, image_data, depth_data, client_addr):
     
     print("="*60 + "\n")
 
+def save_frame_files(metadata, image_data, depth_data, client_addr, client_id, websocket_session_id):
+    """
+    Save frame files (image, depth, metadata) and return file paths and frame number.
+    
+    Args:
+        metadata: Dictionary containing frame metadata
+        image_data: Binary image data
+        depth_data: Binary depth data (can be None)
+        client_addr: Client IP address
+        client_id: Server-generated client identifier (IP:port)
+        websocket_session_id: WebSocket session ID if available, None otherwise
+    
+    Returns:
+        tuple: (image_filename, depth_filename, metadata_filename, frame_number, tracking_id, metadata_to_save)
+    """
+    # Get WebSocket session ID from IP address mapping if not provided
+    if websocket_session_id is None:
+        websocket_session_id = client_ip_to_session_id.get(client_addr)
+    
+    client_device_name = metadata.get("client_id", client_id)
+    
+    # Use WebSocket session ID if available, otherwise use device name
+    identifier_to_use = websocket_session_id if websocket_session_id else client_device_name
+    
+    # Sanitize client identifier for filesystem use (replace spaces and special chars with underscores)
+    sanitized_client_id = re.sub(r'[^\w\-_\.]', '_', identifier_to_use)
+    # Remove multiple consecutive underscores
+    sanitized_client_id = re.sub(r'_+', '_', sanitized_client_id)
+    # Remove leading/trailing underscores
+    sanitized_client_id = sanitized_client_id.strip('_')
+    # If empty after sanitization, use server client_id
+    if not sanitized_client_id:
+        sanitized_client_id = client_id.replace(':', '_')
+    
+    # Get or increment frame number for this client
+    # Use WebSocket session ID for tracking if available, otherwise use server client_id
+    tracking_id = websocket_session_id if websocket_session_id else client_id
+    if tracking_id not in frame_counters:
+        frame_counters[tracking_id] = 0
+    frame_counters[tracking_id] += 1
+    frame_number = frame_counters[tracking_id]
+    
+    # Generate timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Save image with client identifier in filename
+    image_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}.jpg'
+    with open(image_filename, 'wb') as f:
+        f.write(image_data)
+    print(f"[{client_id}] Saved image: {image_filename}")
+
+    depth_filename = None
+    if depth_data is not None:
+        depth_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}_depth.bin'
+        with open(depth_filename, 'wb') as f:
+            f.write(depth_data)
+        print(f"[{client_id}] Saved depth map: {depth_filename}")
+    
+    # Save metadata (include saved file references)
+    metadata_to_save = dict(metadata)
+    extrinsics = metadata_to_save.get("extrinsics")
+    if isinstance(extrinsics, list):
+        try:
+            extrinsics_matrix = np.array(extrinsics).reshape(4, 4)
+            print("update extrinsics before saving")
+            metadata_to_save["extrinsics"] = extrinsics_matrix.flatten(order='F').tolist()
+        except ValueError:
+            # Leave as-is if the list cannot be reshaped (unexpected length)
+            pass
+    
+    # Add server-side client identifier (IP:port) to metadata
+    # Client-provided identifier is already in metadata as "client_id"
+    server_info = metadata_to_save.get("_server")
+    if not isinstance(server_info, dict):
+        server_info = {}
+    server_info["image_file"] = os.path.basename(image_filename)
+    if depth_filename:
+        server_info["depth_file"] = os.path.basename(depth_filename)
+    server_info["server_client_id"] = client_id  # Server-generated identifier (IP:port)
+    metadata_to_save["_server"] = server_info
+
+    metadata_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}_metadata.json'
+    with open(metadata_filename, 'w') as f:
+        json.dump(metadata_to_save, f, indent=2)
+    print(f"[{client_id}] Saved metadata: {metadata_filename}")
+    
+    return (image_filename, depth_filename, metadata_filename, frame_number, tracking_id, metadata_to_save)
+
+def handle_capture_response(metadata, tracking_id, image_filename, depth_filename, metadata_filename):
+    """
+    Handle capture response tracking and call /process endpoint when all clients respond.
+    
+    Args:
+        metadata: Dictionary containing frame metadata (must include capture_id if part of capture)
+        tracking_id: Client tracking identifier
+        image_filename: Path to saved image file
+        depth_filename: Path to saved depth file (can be None)
+        metadata_filename: Path to saved metadata file
+    """
+    # Check if this frame is part of a pending capture
+    capture_id = metadata.get('capture_id')
+    if capture_id and capture_id in pending_captures:
+        with capture_lock:
+            # Mark this client as having responded
+            if capture_id not in capture_responses:
+                capture_responses[capture_id] = set()
+            capture_responses[capture_id].add(tracking_id)
+            
+            # Store image paths for this capture (using absolute paths)
+            if capture_id not in capture_image_paths:
+                capture_image_paths[capture_id] = []
+            
+            image_path_data = {
+                'image_path': os.path.abspath(image_filename),
+                'metadata_path': os.path.abspath(metadata_filename)
+            }
+            if depth_filename:
+                image_path_data['depth_path'] = os.path.abspath(depth_filename)
+            capture_image_paths[capture_id].append(image_path_data)
+            
+            # Check if all expected clients have responded
+            expected_clients = pending_captures[capture_id]
+            responded_clients = capture_responses[capture_id]
+            
+            if responded_clients.issuperset(expected_clients):
+                # All clients have responded, call the process endpoint
+                print(f"\n[Capture {capture_id}] All {len(expected_clients)} client(s) have responded. Calling /process endpoint...")
+                
+                # Prepare the request data with image paths
+                request_data = {
+                    'capture_id': capture_id,
+                    'images': capture_image_paths[capture_id]
+                }
+                
+                try:
+                    response = requests.post(PROCESS_ENDPOINT, json=request_data, timeout=10)
+                    print(f"[Process] Response status: {response.status_code}")
+                    if response.status_code == 200:
+                        print(f"[Process] Successfully called /process endpoint with {len(capture_image_paths[capture_id])} image(s)")
+                    else:
+                        print(f"[Process] Warning: /process returned status {response.status_code}")
+                except requests.exceptions.RequestException as e:
+                    print(f"[Process] Error calling /process endpoint: {e}")
+                
+                # Clean up tracking for this capture
+                del pending_captures[capture_id]
+                del capture_responses[capture_id]
+                del capture_image_paths[capture_id]
+            else:
+                remaining = len(expected_clients) - len(responded_clients)
+                print(f"[Capture {capture_id}] {len(responded_clients)}/{len(expected_clients)} clients responded ({remaining} remaining)")
+
 @app.route('/upload_frame', methods=['POST'])
 def upload_frame():
     """Handle AR frame upload with image and camera data."""
@@ -169,128 +331,17 @@ def upload_frame():
         
         # Get WebSocket session ID from IP address mapping (this is the unique Socket.IO session ID)
         websocket_session_id = client_ip_to_session_id.get(client_addr)
-        client_device_name = metadata.get("client_id", client_id)
         
-        # Use WebSocket session ID if available, otherwise use device name
-        identifier_to_use = websocket_session_id if websocket_session_id else client_device_name
-        
-        # Sanitize client identifier for filesystem use (replace spaces and special chars with underscores)
-        sanitized_client_id = re.sub(r'[^\w\-_\.]', '_', identifier_to_use)
-        # Remove multiple consecutive underscores
-        sanitized_client_id = re.sub(r'_+', '_', sanitized_client_id)
-        # Remove leading/trailing underscores
-        sanitized_client_id = sanitized_client_id.strip('_')
-        # If empty after sanitization, use server client_id
-        if not sanitized_client_id:
-            sanitized_client_id = client_id.replace(':', '_')
-        
-        # Get or increment frame number for this client
-        # Use WebSocket session ID for tracking if available, otherwise use server client_id
-        tracking_id = websocket_session_id if websocket_session_id else client_id
-        if tracking_id not in frame_counters:
-            frame_counters[tracking_id] = 0
-        frame_counters[tracking_id] += 1
-        frame_number = frame_counters[tracking_id]
-        
-        # Generate timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-        # Save image with client identifier in filename
-        image_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}.jpg'
-        with open(image_filename, 'wb') as f:
-            f.write(image_data)
-        print(f"[{client_id}] Saved image: {image_filename}")
-
-        depth_filename = None
-        if depth_data is not None:
-            depth_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}_depth.bin'
-            with open(depth_filename, 'wb') as f:
-                f.write(depth_data)
-            print(f"[{client_id}] Saved depth map: {depth_filename}")
-        
-        # Save metadata (include saved file references)
-        metadata_to_save = dict(metadata)
-        extrinsics = metadata_to_save.get("extrinsics")
-        if isinstance(extrinsics, list):
-            try:
-                extrinsics_matrix = np.array(extrinsics).reshape(4, 4)
-                print("update extrinsics before saving")
-                metadata_to_save["extrinsics"] = extrinsics_matrix.flatten(order='F').tolist()
-            except ValueError:
-                # Leave as-is if the list cannot be reshaped (unexpected length)
-                pass
-        
-        # Add server-side client identifier (IP:port) to metadata
-        # Client-provided identifier is already in metadata as "client_id"
-        server_info = metadata_to_save.get("_server")
-        if not isinstance(server_info, dict):
-            server_info = {}
-        server_info["image_file"] = os.path.basename(image_filename)
-        if depth_filename:
-            server_info["depth_file"] = os.path.basename(depth_filename)
-        server_info["server_client_id"] = client_id  # Server-generated identifier (IP:port)
-        metadata_to_save["_server"] = server_info
-
-        metadata_filename = f'{RECEIVED_DIR}/frame_{sanitized_client_id}_{frame_number:04d}_{timestamp}_metadata.json'
-        with open(metadata_filename, 'w') as f:
-            json.dump(metadata_to_save, f, indent=2)
-        print(f"[{client_id}] Saved metadata: {metadata_filename}")
+        # Save files using shared helper function
+        image_filename, depth_filename, metadata_filename, frame_number, tracking_id, metadata_to_save = save_frame_files(
+            metadata, image_data, depth_data, client_addr, client_id, websocket_session_id
+        )
         
         # Process and display camera data
         process_camera_data(metadata_to_save, image_data, depth_data, client_id)
         
-        # Check if this frame is part of a pending capture
-        capture_id = metadata.get('capture_id')
-        if capture_id and capture_id in pending_captures:
-            with capture_lock:
-                # Mark this client as having responded
-                if capture_id not in capture_responses:
-                    capture_responses[capture_id] = set()
-                capture_responses[capture_id].add(tracking_id)
-                
-                # Store image paths for this capture (using absolute paths)
-                if capture_id not in capture_image_paths:
-                    capture_image_paths[capture_id] = []
-                
-                image_path_data = {
-                    'image_path': os.path.abspath(image_filename),
-                    'metadata_path': os.path.abspath(metadata_filename)
-                }
-                if depth_filename:
-                    image_path_data['depth_path'] = os.path.abspath(depth_filename)
-                capture_image_paths[capture_id].append(image_path_data)
-                
-                # Check if all expected clients have responded
-                expected_clients = pending_captures[capture_id]
-                responded_clients = capture_responses[capture_id]
-                
-                if responded_clients.issuperset(expected_clients):
-                    # All clients have responded, call the process endpoint
-                    print(f"\n[Capture {capture_id}] All {len(expected_clients)} client(s) have responded. Calling /process endpoint...")
-                    
-                    # Prepare the request data with image paths
-                    request_data = {
-                        'capture_id': capture_id,
-                        'images': capture_image_paths[capture_id]
-                    }
-                    
-                    try:
-                        response = requests.post(PROCESS_ENDPOINT, json=request_data, timeout=10)
-                        print(f"[Process] Response status: {response.status_code}")
-                        if response.status_code == 200:
-                            print(f"[Process] Successfully called /process endpoint with {len(capture_image_paths[capture_id])} image(s)")
-                        else:
-                            print(f"[Process] Warning: /process returned status {response.status_code}")
-                    except requests.exceptions.RequestException as e:
-                        print(f"[Process] Error calling /process endpoint: {e}")
-                    
-                    # Clean up tracking for this capture
-                    del pending_captures[capture_id]
-                    del capture_responses[capture_id]
-                    del capture_image_paths[capture_id]
-                else:
-                    remaining = len(expected_clients) - len(responded_clients)
-                    print(f"[Capture {capture_id}] {len(responded_clients)}/{len(expected_clients)} clients responded ({remaining} remaining)")
+        # Handle capture response tracking
+        handle_capture_response(metadata_to_save, tracking_id, image_filename, depth_filename, metadata_filename)
         
         return jsonify({
             "status": "received",
@@ -327,9 +378,10 @@ def handle_connect():
     emit('connected', {'status': 'connected', 'client_id': client_id})
 
 @socketio.on('disconnect')
-def handle_disconnect():
+def handle_disconnect(sid=None):
     """Handle WebSocket client disconnection."""
-    client_id = request.sid
+    # Flask-SocketIO may pass session ID as argument in some versions
+    client_id = sid if sid else request.sid
     client_ip = request.remote_addr
     connected_clients.discard(client_id)
     # Remove IP mapping if it matches this session
@@ -375,6 +427,86 @@ def handle_client_ready(data):
         connected_clients.add(client_id)
         print(f"[WebSocket] Added client to connected set: {client_id}")
         print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
+
+@socketio.on('frame_response')
+def handle_frame_response(data):
+    """Handle frame data sent via WebSocket (for triggered captures)."""
+    client_id = request.sid
+    client_ip = request.remote_addr
+    client_identifier = f"{client_ip}:{request.environ.get('REMOTE_PORT', 'unknown')}"
+    
+    print(f"[WebSocket] Received frame_response from {client_identifier} (session: {client_id})")
+    
+    try:
+        # Socket.IO sends data directly as the emitted object
+        if not isinstance(data, dict):
+            print(f"[WebSocket] Invalid data type: {type(data)}, expected dict")
+            emit('frame_response_error', {'status': 'error', 'message': 'Data must be a dictionary'})
+            return
+        
+        # Extract metadata
+        if 'metadata' not in data:
+            print(f"[WebSocket] Missing metadata in frame_response")
+            emit('frame_response_error', {'status': 'error', 'message': 'No metadata provided'})
+            return
+        
+        metadata = data['metadata']
+        
+        # Extract and decode image data (base64)
+        if 'image' not in data:
+            print(f"[WebSocket] Missing image data in frame_response")
+            emit('frame_response_error', {'status': 'error', 'message': 'No image data provided'})
+            return
+        
+        try:
+            image_base64 = data['image']
+            image_data = base64.b64decode(image_base64)
+            print(f"[WebSocket] Decoded image data: {len(image_data)} bytes")
+        except Exception as e:
+            print(f"[WebSocket] Failed to decode image: {e}")
+            emit('frame_response_error', {'status': 'error', 'message': f'Failed to decode image: {str(e)}'})
+            return
+        
+        # Extract and decode depth data (base64, optional)
+        depth_data = None
+        if 'depth' in data and data['depth']:
+            try:
+                depth_base64 = data['depth']
+                depth_data = base64.b64decode(depth_base64)
+                print(f"[WebSocket] Decoded depth data: {len(depth_data)} bytes")
+            except Exception as e:
+                print(f"[{client_identifier}] Warning: Failed to decode depth data: {e}")
+                depth_data = None
+        
+        # Use WebSocket session ID for tracking
+        websocket_session_id = client_id
+        
+        # Save files using shared helper function
+        print(f"[WebSocket] Saving frame files...")
+        image_filename, depth_filename, metadata_filename, frame_number, tracking_id, metadata_to_save = save_frame_files(
+            metadata, image_data, depth_data, client_ip, client_identifier, websocket_session_id
+        )
+        
+        # Process and display camera data
+        process_camera_data(metadata_to_save, image_data, depth_data, client_identifier)
+        
+        # Handle capture response tracking
+        handle_capture_response(metadata_to_save, tracking_id, image_filename, depth_filename, metadata_filename)
+        
+        # Send success response
+        print(f"[WebSocket] Frame {frame_number} processed successfully")
+        emit('frame_response_ack', {
+            'status': 'received',
+            'frame': frame_number,
+            'depth_saved': depth_filename is not None,
+            'message': 'Frame received successfully'
+        })
+        
+    except Exception as e:
+        print(f"[{client_identifier}] Error processing WebSocket frame: {e}")
+        import traceback
+        traceback.print_exc()
+        emit('frame_response_error', {'status': 'error', 'message': str(e)})
 
 def keyboard_input_thread():
     """Background thread to listen for keyboard input and trigger captures."""

@@ -133,6 +133,32 @@ class WebSocketManager: ObservableObject {
         }
     }
     
+    func sendFrameData(metadata: [String: Any], imageData: Data, depthData: Data?) {
+        guard let socket = socket else {
+            print("[WebSocket] Cannot send frame data - socket not connected")
+            return
+        }
+        
+        // Encode image data as base64
+        let imageBase64 = imageData.base64EncodedString()
+        
+        // Prepare frame data dictionary
+        var frameData: [String: Any] = [
+            "metadata": metadata,
+            "image": imageBase64
+        ]
+        
+        // Add depth data if available
+        if let depthData = depthData {
+            let depthBase64 = depthData.base64EncodedString()
+            frameData["depth"] = depthBase64
+        }
+        
+        // Emit frame_response event
+        socket.emit("frame_response", frameData)
+        print("[WebSocket] Sent frame data via WebSocket (image: \(imageData.count) bytes)")
+    }
+    
     func disconnect() {
         socket?.disconnect()
         socket = nil

@@ -82,7 +82,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                 self?.statusMessage = "Remote trigger received - capturing frame..."
                 self?.currentCaptureId = captureId
             }
-            self?.sendFrameToServer()
+            // Use WebSocket for triggered captures to reduce latency
+            self?.sendFrameToServer(useWebSocket: true)
         }
         
         // Observe WebSocket status changes
@@ -816,8 +817,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     }
     
     // MARK: - Server Communication
-    func sendFrameToServer() {
-        print("sendFrameToServer: Called")
+    func sendFrameToServer(useWebSocket: Bool = false) {
+        print("sendFrameToServer: Called (useWebSocket: \(useWebSocket))")
         guard let arSession = arSession, let currentFrame = arSession.currentFrame else {
             DispatchQueue.main.async {
                 self.statusMessage = "No AR frame available"
@@ -990,8 +991,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                 }
             }
             
-            // Send to server
-            self.sendToServer(metadata: metadata, imageData: imageData, depthData: depthPayload)
+            // Send to server (use WebSocket for triggered captures, HTTP for manual captures)
+            self.sendToServer(metadata: metadata, imageData: imageData, depthData: depthPayload, useWebSocket: useWebSocket)
         }
     }
     
@@ -1187,7 +1188,14 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         }
     }
     
-    private func sendToServer(metadata: [String: Any], imageData: Data, depthData: Data? = nil) {
+    private func sendToServer(metadata: [String: Any], imageData: Data, depthData: Data? = nil, useWebSocket: Bool = false) {
+        // Use WebSocket for triggered captures (lower latency)
+        if useWebSocket {
+            webSocketManager?.sendFrameData(metadata: metadata, imageData: imageData, depthData: depthData)
+            return
+        }
+        
+        // Use HTTP POST for manual captures
         guard let jsonData = try? JSONSerialization.data(withJSONObject: metadata) else {
             DispatchQueue.main.async {
                 self.statusMessage = "Failed to serialize metadata"
