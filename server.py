@@ -7,6 +7,7 @@ import os
 import threading
 import sys
 import re
+import requests
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -25,6 +26,18 @@ last_trigger_time = None
 # Map client IP addresses to WebSocket session IDs
 # Format: {ip_address: websocket_session_id}
 client_ip_to_session_id = {}
+
+# Track pending captures: {capture_id: set of client_ids that should respond}
+pending_captures = {}
+# Track which clients have responded for each capture: {capture_id: set of client_ids that have responded}
+capture_responses = {}
+# Track image paths for each capture: {capture_id: list of dicts with image_path, depth_path, metadata_path}
+capture_image_paths = {}
+# Lock for thread-safe access to capture tracking
+capture_lock = threading.Lock()
+
+# URL for the process endpoint
+PROCESS_ENDPOINT = 'http://127.0.0.1:8081/process'
 
 def process_camera_data(metadata, image_data, depth_data, client_addr):
     """Process and display camera intrinsics and extrinsics."""
@@ -226,6 +239,59 @@ def upload_frame():
         # Process and display camera data
         process_camera_data(metadata_to_save, image_data, depth_data, client_id)
         
+        # Check if this frame is part of a pending capture
+        capture_id = metadata.get('capture_id')
+        if capture_id and capture_id in pending_captures:
+            with capture_lock:
+                # Mark this client as having responded
+                if capture_id not in capture_responses:
+                    capture_responses[capture_id] = set()
+                capture_responses[capture_id].add(tracking_id)
+                
+                # Store image paths for this capture (using absolute paths)
+                if capture_id not in capture_image_paths:
+                    capture_image_paths[capture_id] = []
+                
+                image_path_data = {
+                    'image_path': os.path.abspath(image_filename),
+                    'metadata_path': os.path.abspath(metadata_filename)
+                }
+                if depth_filename:
+                    image_path_data['depth_path'] = os.path.abspath(depth_filename)
+                capture_image_paths[capture_id].append(image_path_data)
+                
+                # Check if all expected clients have responded
+                expected_clients = pending_captures[capture_id]
+                responded_clients = capture_responses[capture_id]
+                
+                if responded_clients.issuperset(expected_clients):
+                    # All clients have responded, call the process endpoint
+                    print(f"\n[Capture {capture_id}] All {len(expected_clients)} client(s) have responded. Calling /process endpoint...")
+                    
+                    # Prepare the request data with image paths
+                    request_data = {
+                        'capture_id': capture_id,
+                        'images': capture_image_paths[capture_id]
+                    }
+                    
+                    try:
+                        response = requests.post(PROCESS_ENDPOINT, json=request_data, timeout=10)
+                        print(f"[Process] Response status: {response.status_code}")
+                        if response.status_code == 200:
+                            print(f"[Process] Successfully called /process endpoint with {len(capture_image_paths[capture_id])} image(s)")
+                        else:
+                            print(f"[Process] Warning: /process returned status {response.status_code}")
+                    except requests.exceptions.RequestException as e:
+                        print(f"[Process] Error calling /process endpoint: {e}")
+                    
+                    # Clean up tracking for this capture
+                    del pending_captures[capture_id]
+                    del capture_responses[capture_id]
+                    del capture_image_paths[capture_id]
+                else:
+                    remaining = len(expected_clients) - len(responded_clients)
+                    print(f"[Capture {capture_id}] {len(responded_clients)}/{len(expected_clients)} clients responded ({remaining} remaining)")
+        
         return jsonify({
             "status": "received",
             "frame": frame_number,
@@ -269,6 +335,25 @@ def handle_disconnect():
     # Remove IP mapping if it matches this session
     if client_ip in client_ip_to_session_id and client_ip_to_session_id[client_ip] == client_id:
         del client_ip_to_session_id[client_ip]
+    
+    # Clean up any pending captures that expected this client
+    with capture_lock:
+        captures_to_remove = []
+        for capture_id, expected_clients in pending_captures.items():
+            if client_id in expected_clients:
+                expected_clients.discard(client_id)
+                # If no clients left to wait for, remove the capture
+                if len(expected_clients) == 0:
+                    captures_to_remove.append(capture_id)
+        
+        for capture_id in captures_to_remove:
+            if capture_id in pending_captures:
+                del pending_captures[capture_id]
+            if capture_id in capture_responses:
+                del capture_responses[capture_id]
+            if capture_id in capture_image_paths:
+                del capture_image_paths[capture_id]
+    
     print(f"\n[WebSocket] Client disconnected: {client_id}")
     print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
 
@@ -307,9 +392,21 @@ def keyboard_input_thread():
                 if len(connected_clients) > 0:
                     global last_trigger_time
                     last_trigger_time = datetime.now()
-                    trigger_data = {'timestamp': last_trigger_time.isoformat()}
+                    # Create a unique capture ID based on timestamp
+                    capture_id = last_trigger_time.strftime('%Y%m%d_%H%M%S_%f')
+                    trigger_data = {
+                        'timestamp': last_trigger_time.isoformat(),
+                        'capture_id': capture_id
+                    }
                     print(f"\n[Trigger] Broadcasting capture_frame to {len(connected_clients)} client(s)...")
+                    print(f"[Trigger] Capture ID: {capture_id}")
                     print(f"[Trigger] Connected clients: {list(connected_clients)}")
+                    
+                    # Track which clients should respond to this capture
+                    with capture_lock:
+                        pending_captures[capture_id] = set(connected_clients)
+                        capture_responses[capture_id] = set()
+                    
                     # Emit to each connected client individually to ensure all receive it
                     # This is more reliable than relying on broadcast behavior from background threads
                     clients_list = list(connected_clients)  # Create a copy to avoid modification during iteration
@@ -317,6 +414,7 @@ def keyboard_input_thread():
                         socketio.emit('capture_frame', trigger_data, to=client_id)
                         print(f"[Trigger] Sent to client: {client_id}")
                     print(f"[Trigger] Capture command sent at {last_trigger_time.strftime('%H:%M:%S')}")
+                    print(f"[Trigger] Waiting for {len(connected_clients)} client(s) to respond...")
                 else:
                     print("\n[Trigger] No clients connected. Waiting for connections...")
         except (EOFError, KeyboardInterrupt):

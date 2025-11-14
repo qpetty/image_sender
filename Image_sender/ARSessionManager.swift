@@ -23,6 +23,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     @Published var webSocketStatus: WebSocketConnectionStatus = .disconnected
     @Published var lastRemoteTrigger: Date?
     
+    // Store current capture_id for frame uploads
+    private var currentCaptureId: String?
+    
     private var arView: ARView?
     private var arSession: ARSession? {
         return arView?.session
@@ -72,11 +75,12 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         
         // Initialize WebSocket manager
         webSocketManager = WebSocketManager(serverIP: serverIP, serverPort: serverPort)
-        webSocketManager?.onCaptureTrigger = { [weak self] in
+        webSocketManager?.onCaptureTrigger = { [weak self] captureId in
             // Trigger frame capture when remote command is received
             DispatchQueue.main.async {
                 self?.lastRemoteTrigger = Date()
                 self?.statusMessage = "Remote trigger received - capturing frame..."
+                self?.currentCaptureId = captureId
             }
             self?.sendFrameToServer()
         }
@@ -975,6 +979,15 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
 
             if let depthInfo = depthInfo {
                 metadata["depth_info"] = depthInfo
+            }
+            
+            // Include capture_id if available (from WebSocket trigger)
+            if let captureId = self.currentCaptureId {
+                metadata["capture_id"] = captureId
+                // Clear capture_id after including it to prevent reuse in manual captures
+                DispatchQueue.main.async {
+                    self.currentCaptureId = nil
+                }
             }
             
             // Send to server

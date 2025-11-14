@@ -27,7 +27,7 @@ class WebSocketManager: ObservableObject {
     private var socket: SocketIOClient?
     private var serverURL: String
     
-    var onCaptureTrigger: (() -> Void)?
+    var onCaptureTrigger: ((String?) -> Void)?
     
     init(serverIP: String, serverPort: UInt16 = 8080) {
         // Flask-SocketIO uses Socket.IO protocol
@@ -119,9 +119,16 @@ class WebSocketManager: ObservableObject {
         
         socket.on("capture_frame") { [weak self] data, ack in
             print("[WebSocket] Received capture_frame trigger")
+            // Extract capture_id from event data
+            var captureId: String? = nil
+            if let dataDict = data.first as? [String: Any],
+               let captureIdValue = dataDict["capture_id"] as? String {
+                captureId = captureIdValue
+                print("[WebSocket] Capture ID: \(captureIdValue)")
+            }
             DispatchQueue.main.async {
                 self?.lastTriggerReceived = Date()
-                self?.onCaptureTrigger?()
+                self?.onCaptureTrigger?(captureId)
             }
         }
     }
