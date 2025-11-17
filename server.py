@@ -370,23 +370,98 @@ def handle_connect():
     """Handle WebSocket client connection."""
     client_id = request.sid
     client_ip = request.remote_addr
+    
+    # Check if this client is already in the set (shouldn't happen, but be safe)
+    was_already_connected = client_id in connected_clients
     connected_clients.add(client_id)
+    
     # Map IP address to WebSocket session ID
+    # If IP was mapped to a different session, update it
+    old_session = client_ip_to_session_id.get(client_ip)
+    if old_session and old_session != client_id and old_session in connected_clients:
+        # Old session still exists, keep both mappings if possible
+        # But typically the old session should have been cleaned up
+        print(f"[WebSocket] Warning: IP {client_ip} was mapped to {old_session}, now connecting as {client_id}")
+    
     client_ip_to_session_id[client_ip] = client_id
-    print(f"\n[WebSocket] Client connected: {client_id} (IP: {client_ip})")
+    
+    if was_already_connected:
+        print(f"\n[WebSocket] Client reconnected (was already in set): {client_id} (IP: {client_ip})")
+    else:
+        print(f"\n[WebSocket] Client connected: {client_id} (IP: {client_ip})")
     print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
     emit('connected', {'status': 'connected', 'client_id': client_id})
 
+def cleanup_stale_connections():
+    """Remove any clients from connected_clients that are no longer actually connected."""
+    try:
+        # Get all actual connected session IDs from Flask-SocketIO's manager
+        actual_sessions = set()
+        try:
+            # Flask-SocketIO stores sessions in the server's manager
+            # Each client is in a room named with their session ID
+            manager = socketio.server.manager
+            if hasattr(manager, 'rooms'):
+                # Get all rooms in the default namespace '/'
+                rooms = manager.rooms.get('/', {})
+                # Each room key is a session ID
+                actual_sessions = set(rooms.keys())
+            elif hasattr(manager, 'get_namespaces'):
+                # Alternative: get participants from namespaces
+                for namespace in manager.get_namespaces():
+                    if hasattr(manager, 'get_participants'):
+                        participants = manager.get_participants(namespace, None)
+                        if participants:
+                            actual_sessions.update(participants)
+        except Exception as e:
+            print(f"[WebSocket] Could not query Flask-SocketIO manager: {e}")
+            return 0
+        
+        # Remove stale entries (clients in our set but not actually connected)
+        stale_clients = connected_clients - actual_sessions
+        if stale_clients:
+            print(f"[WebSocket] Cleaning up {len(stale_clients)} stale connection(s): {stale_clients}")
+            connected_clients.difference_update(stale_clients)
+            # Also clean up IP mappings for stale clients
+            stale_ips = [ip for ip, sid in client_ip_to_session_id.items() if sid in stale_clients]
+            for ip in stale_ips:
+                del client_ip_to_session_id[ip]
+            return len(stale_clients)
+    except Exception as e:
+        print(f"[WebSocket] Error during stale connection cleanup: {e}")
+        import traceback
+        traceback.print_exc()
+    return 0
+
 @socketio.on('disconnect')
-def handle_disconnect(sid=None):
+def handle_disconnect(sid):
     """Handle WebSocket client disconnection."""
-    # Flask-SocketIO may pass session ID as argument in some versions
-    client_id = sid if sid else request.sid
-    client_ip = request.remote_addr
-    connected_clients.discard(client_id)
+    # Flask-SocketIO passes the session ID as a positional argument
+    client_id = sid
+    print(f"[WebSocket] Disconnect event received for client_id: {client_id}")
+    print(f"[WebSocket] Current connected_clients before removal: {connected_clients}")
+    
+    # Get client IP if available
+    client_ip = None
+    try:
+        client_ip = request.remote_addr
+    except (AttributeError, RuntimeError):
+        pass
+    
+    # Remove from connected clients set (this updates the count)
+    was_connected = client_id in connected_clients
+    if was_connected:
+        connected_clients.discard(client_id)
+        print(f"\n[WebSocket] Client disconnected: {client_id}")
+        print(f"[WebSocket] Removed {client_id} from connected_clients set")
+    else:
+        print(f"\n[WebSocket] Client disconnected: {client_id} (was not in connected set)")
+        print(f"[WebSocket] Current connected_clients: {connected_clients}")
+    
     # Remove IP mapping if it matches this session
-    if client_ip in client_ip_to_session_id and client_ip_to_session_id[client_ip] == client_id:
+    if client_ip and client_ip in client_ip_to_session_id and client_ip_to_session_id[client_ip] == client_id:
         del client_ip_to_session_id[client_ip]
+        print(f"[WebSocket] Removed IP mapping for {client_ip}")
     
     # Clean up any pending captures that expected this client
     with capture_lock:
@@ -406,7 +481,7 @@ def handle_disconnect(sid=None):
             if capture_id in capture_image_paths:
                 del capture_image_paths[capture_id]
     
-    print(f"\n[WebSocket] Client disconnected: {client_id}")
+    # Always print updated count after removal
     print(f"[WebSocket] Total connected clients: {len(connected_clients)}")
 
 @socketio.on_error_default
@@ -521,6 +596,9 @@ def keyboard_input_thread():
             line = sys.stdin.readline()
             if line.strip() == '' or line.strip() == '\n':
                 # Enter key pressed
+                # Clean up stale connections before checking count
+                cleanup_stale_connections()
+                
                 if len(connected_clients) > 0:
                     global last_trigger_time
                     last_trigger_time = datetime.now()
