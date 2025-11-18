@@ -492,6 +492,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         isSessionRunning = true
         statusMessage = "AR Session started"
         
+        // Disable idle timer to prevent lock screen during AR session
+        UIApplication.shared.isIdleTimerDisabled = true
+        
         // Connect WebSocket when AR session starts
         webSocketManager?.connect()
         
@@ -507,6 +510,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         isSessionRunning = false
         sessionStartTime = nil
         statusMessage = "AR Session stopped"
+        
+        // Re-enable idle timer to allow lock screen when AR session stops
+        UIApplication.shared.isIdleTimerDisabled = false
         
         // Disconnect WebSocket when AR session stops
         webSocketManager?.disconnect()
