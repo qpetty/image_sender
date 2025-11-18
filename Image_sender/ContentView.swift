@@ -19,6 +19,25 @@ struct ContentView: View {
                 ARViewContainer(sessionManager: sessionManager)
                     .edgesIgnoringSafeArea(.all)
                 
+                // Camera to Sphere Distance (top left corner)
+                if let distance = sessionManager.cameraToSphereDistance {
+                    VStack {
+                        HStack {
+                            Text(String(format: "%.2f m", distance))
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.black.opacity(0.7))
+                                .cornerRadius(6)
+                            Spacer()
+                        }
+                        Spacer()
+                    }
+                    .padding(.top, 10)
+                    .padding(.leading, 10)
+                }
+                
                 // Control Panel
                 if isLandscape {
                     // Landscape layout: buttons on right side

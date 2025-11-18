@@ -100,6 +100,20 @@ def process_camera_data(metadata, image_data, depth_data, client_addr):
         else:
             print(f"  {extrinsics}")
     
+    # Extract and print camera to sphere distance
+    if 'camera_to_sphere_distance' in metadata:
+        distance = metadata['camera_to_sphere_distance']
+        print(f"\nCamera to Sphere Distance: {distance:.4f} meters")
+    else:
+        # Calculate distance from extrinsics if not provided
+        if 'extrinsics' in metadata:
+            extrinsics = metadata['extrinsics']
+            if isinstance(extrinsics, list) and len(extrinsics) == 16:
+                extrinsics_matrix = np.array(extrinsics).reshape(4, 4)
+                translation = extrinsics_matrix[:3, 3]
+                distance = np.linalg.norm(translation)
+                print(f"\nCamera to Sphere Distance (calculated): {distance:.4f} meters")
+    
     # Image info
     print(f"\nImage size: {len(image_data)} bytes")
     if 'image_width' in metadata and 'image_height' in metadata:

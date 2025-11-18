@@ -22,6 +22,7 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     @Published var isSynchronized = false
     @Published var webSocketStatus: WebSocketConnectionStatus = .disconnected
     @Published var lastRemoteTrigger: Date?
+    @Published var cameraToSphereDistance: Float? // Distance in meters
     
     // Store current capture_id for frame uploads
     private var currentCaptureId: String?
@@ -822,6 +823,67 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         print("Client: Removed local sphere, will receive synchronized sphere from host")
     }
     
+    // MARK: - Distance Calculation
+    /// Calculate and update the distance from camera to sphere
+    private func updateCameraToSphereDistance() {
+        guard let arSession = arSession,
+              let currentFrame = arSession.currentFrame,
+              let sphereAnchor = sphereAnchor else {
+            // Clear distance if sphere or frame not available
+            DispatchQueue.main.async {
+                self.cameraToSphereDistance = nil
+            }
+            return
+        }
+        
+        let camera = currentFrame.camera
+        let cameraTransform = camera.transform
+        
+        // Get sphere transform
+        let sphereTransform: simd_float4x4
+        if let sphereARAnchor = self.sphereARAnchor {
+            // Host mode: use ARAnchor (more accurate as it's tracked by ARKit)
+            sphereTransform = sphereARAnchor.transform
+        } else {
+            // Client mode: use synchronized AnchorEntity transform
+            sphereTransform = sphereAnchor.transform.matrix
+        }
+        
+        // Convert both to OpenCV world space
+        let F = float4x4(
+            columns: (
+                simd_float4(1,  0,  0, 0),
+                simd_float4(0, -1,  0, 0),
+                simd_float4(0,  0, -1, 0),
+                simd_float4(0,  0,  0, 1)
+            )
+        )
+        
+        func convertToOpenCV(_ transform: simd_float4x4) -> simd_float4x4 {
+            return F * transform * F
+        }
+        
+        let cameraTransformOCV = convertToOpenCV(cameraTransform)
+        let sphereTransformOCV = convertToOpenCV(sphereTransform)
+        
+        // Calculate relative transform: camera to sphere
+        let sphereTransformInverseOCV = sphereTransformOCV.inverse
+        let cameraToSphereTransform = sphereTransformInverseOCV * cameraTransformOCV
+        
+        // Calculate distance from camera to sphere
+        let translation = simd_float3(
+            cameraToSphereTransform.columns.3.x,
+            cameraToSphereTransform.columns.3.y,
+            cameraToSphereTransform.columns.3.z
+        )
+        let distance = simd_length(translation)
+        
+        // Update published property on main thread
+        DispatchQueue.main.async {
+            self.cameraToSphereDistance = distance
+        }
+    }
+    
     // MARK: - Server Communication
     func sendFrameToServer(useWebSocket: Bool = false) {
         print("sendFrameToServer: Called (useWebSocket: \(useWebSocket))")
@@ -947,6 +1009,15 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
             let sphereTransformInverseOCV = sphereTransformOCV.inverse
             let cameraToSphereTransform = sphereTransformInverseOCV * cameraTransformOCV
             
+            // Calculate distance from camera to sphere
+            // Distance is the magnitude of the translation vector (last column, rows 0-2)
+            let translation = simd_float3(
+                cameraToSphereTransform.columns.3.x,
+                cameraToSphereTransform.columns.3.y,
+                cameraToSphereTransform.columns.3.z
+            )
+            let distance = simd_length(translation)
+            
             print("Camera to Sphere Transform Matrix:")
             for row in 0..<4 {
                 var rowString = ""
@@ -955,6 +1026,7 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                 }
                 print(rowString.trimmingCharacters(in: .whitespaces))
             }
+            print("Camera to Sphere Distance: \(String(format: "%.4f", distance)) meters")
             
             // Convert to array (row-major order)
             var extrinsicsArray: [Float] = []
@@ -976,6 +1048,7 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
             var metadata: [String: Any] = [
                 "intrinsics": intrinsicsArray,
                 "extrinsics": extrinsicsArray,
+                "camera_to_sphere_distance": distance, // Distance in meters
                 "image_size": imageData.count,
                 "image_width": targetWidth,
                 "image_height": targetHeight,
@@ -1270,6 +1343,9 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
 // MARK: - ARSessionDelegate
 extension ARSessionManager: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Update camera to sphere distance continuously
+        updateCameraToSphereDistance()
+        
         // Monitor relocalization status for client devices
         if hasReceivedWorldMap && isClientMode {
             switch frame.worldMappingStatus {
