@@ -9,6 +9,8 @@ import sys
 import re
 import requests
 import base64
+import argparse
+import time
 
 app = Flask(__name__)
 # Increase max_http_buffer_size to handle large base64-encoded images (default is 1MB)
@@ -597,6 +599,42 @@ def handle_frame_response(data):
         traceback.print_exc()
         emit('frame_response_error', {'status': 'error', 'message': str(e)})
 
+def trigger_capture():
+    """Trigger a frame capture on all connected devices."""
+    # Clean up stale connections before checking count
+    cleanup_stale_connections()
+    
+    if len(connected_clients) > 0:
+        global last_trigger_time
+        last_trigger_time = datetime.now()
+        # Create a unique capture ID based on timestamp
+        capture_id = last_trigger_time.strftime('%Y%m%d_%H%M%S_%f')
+        trigger_data = {
+            'timestamp': last_trigger_time.isoformat(),
+            'capture_id': capture_id
+        }
+        print(f"\n[Trigger] Broadcasting capture_frame to {len(connected_clients)} client(s)...")
+        print(f"[Trigger] Capture ID: {capture_id}")
+        print(f"[Trigger] Connected clients: {list(connected_clients)}")
+        
+        # Track which clients should respond to this capture
+        with capture_lock:
+            pending_captures[capture_id] = set(connected_clients)
+            capture_responses[capture_id] = set()
+        
+        # Emit to each connected client individually to ensure all receive it
+        # This is more reliable than relying on broadcast behavior from background threads
+        clients_list = list(connected_clients)  # Create a copy to avoid modification during iteration
+        for client_id in clients_list:
+            socketio.emit('capture_frame', trigger_data, to=client_id)
+            print(f"[Trigger] Sent to client: {client_id}")
+        print(f"[Trigger] Capture command sent at {last_trigger_time.strftime('%H:%M:%S')}")
+        print(f"[Trigger] Waiting for {len(connected_clients)} client(s) to respond...")
+        return True
+    else:
+        print("\n[Trigger] No clients connected. Skipping capture...")
+        return False
+
 def keyboard_input_thread():
     """Background thread to listen for keyboard input and trigger captures."""
     print("\n" + "="*60)
@@ -610,37 +648,7 @@ def keyboard_input_thread():
             line = sys.stdin.readline()
             if line.strip() == '' or line.strip() == '\n':
                 # Enter key pressed
-                # Clean up stale connections before checking count
-                cleanup_stale_connections()
-                
-                if len(connected_clients) > 0:
-                    global last_trigger_time
-                    last_trigger_time = datetime.now()
-                    # Create a unique capture ID based on timestamp
-                    capture_id = last_trigger_time.strftime('%Y%m%d_%H%M%S_%f')
-                    trigger_data = {
-                        'timestamp': last_trigger_time.isoformat(),
-                        'capture_id': capture_id
-                    }
-                    print(f"\n[Trigger] Broadcasting capture_frame to {len(connected_clients)} client(s)...")
-                    print(f"[Trigger] Capture ID: {capture_id}")
-                    print(f"[Trigger] Connected clients: {list(connected_clients)}")
-                    
-                    # Track which clients should respond to this capture
-                    with capture_lock:
-                        pending_captures[capture_id] = set(connected_clients)
-                        capture_responses[capture_id] = set()
-                    
-                    # Emit to each connected client individually to ensure all receive it
-                    # This is more reliable than relying on broadcast behavior from background threads
-                    clients_list = list(connected_clients)  # Create a copy to avoid modification during iteration
-                    for client_id in clients_list:
-                        socketio.emit('capture_frame', trigger_data, to=client_id)
-                        print(f"[Trigger] Sent to client: {client_id}")
-                    print(f"[Trigger] Capture command sent at {last_trigger_time.strftime('%H:%M:%S')}")
-                    print(f"[Trigger] Waiting for {len(connected_clients)} client(s) to respond...")
-                else:
-                    print("\n[Trigger] No clients connected. Waiting for connections...")
+                trigger_capture()
         except (EOFError, KeyboardInterrupt):
             print("\n[Keyboard] Stopping keyboard input thread...")
             break
@@ -649,7 +657,34 @@ def keyboard_input_thread():
             import traceback
             traceback.print_exc()
 
+def interval_capture_thread(interval_ms):
+    """Background thread to trigger captures at specified millisecond intervals."""
+    interval_seconds = interval_ms / 1000.0
+    print(f"\n[Interval] Starting automatic capture at {interval_ms}ms intervals ({interval_seconds:.3f}s)")
+    
+    while True:
+        try:
+            time.sleep(interval_seconds)
+            trigger_capture()
+        except KeyboardInterrupt:
+            print("\n[Interval] Stopping interval capture thread...")
+            break
+        except Exception as e:
+            print(f"\n[Interval] Error in interval capture thread: {e}")
+            import traceback
+            traceback.print_exc()
+
 if __name__ == '__main__':
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='AR Frame Capture Server')
+    parser.add_argument(
+        '--interval',
+        type=int,
+        metavar='MS',
+        help='Trigger frame capture from all connected devices at specified millisecond interval (e.g., --interval 1000 for 1 second intervals)'
+    )
+    args = parser.parse_args()
+    
     print(f"Flask server starting on 0.0.0.0:8080")
     print(f"WebSocket server starting on 0.0.0.0:8080")
     print(f"Images will be saved to: {os.path.abspath(RECEIVED_DIR)}")
@@ -660,9 +695,19 @@ if __name__ == '__main__':
     print(f"  WebSocket /socket.io - WebSocket connection for remote triggering")
     print()
     
-    # Start keyboard input thread
-    keyboard_thread = threading.Thread(target=keyboard_input_thread, daemon=True)
-    keyboard_thread.start()
+    # Start interval capture thread if interval is specified
+    if args.interval:
+        if args.interval <= 0:
+            print(f"Error: Interval must be positive (got {args.interval}ms)")
+            sys.exit(1)
+        interval_thread = threading.Thread(target=interval_capture_thread, args=(args.interval,), daemon=True)
+        interval_thread.start()
+        print(f"[Main] Automatic capture enabled: {args.interval}ms intervals")
+    else:
+        # Start keyboard input thread only if interval mode is not enabled
+        keyboard_thread = threading.Thread(target=keyboard_input_thread, daemon=True)
+        keyboard_thread.start()
+        print(f"[Main] Manual capture mode: Press ENTER to trigger captures")
     
     # Run SocketIO server (which includes Flask)
     socketio.run(app, host='0.0.0.0', port=8080, debug=False, allow_unsafe_werkzeug=True)
