@@ -179,6 +179,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                 self.sphereAnchor = newAnchor
                 
                 print("Host: Moved sphere to position: \(worldPosition)")
+                print("Host: New ARAnchor transform: \(newARAnchor.transform.columns.3)")
+                print("Host: New AnchorEntity transform: \(newAnchor.transform.matrix.columns.3)")
                 DispatchQueue.main.async {
                     self.statusMessage = "Sphere moved to plane"
                 }
@@ -219,8 +221,15 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
     
     private func handleSceneUpdate() {
         // Client: Check if a synchronized sphere anchor has been received from host
-        guard isClientMode, sphereAnchor == nil, let arView = arView else { return }
-        
+        // Also check if current sphereAnchor is still valid (in case host moved the sphere)
+        guard isClientMode, let arView = arView else { return }
+
+        // Check if current sphereAnchor is still in the scene
+        let currentSphereStillValid = sphereAnchor != nil && arView.scene.anchors.contains(where: { $0 === sphereAnchor })
+
+        // Only proceed if we need a new sphere or current one is invalid
+        guard sphereAnchor == nil || !currentSphereStillValid else { return }
+
         // Look for anchors in the scene that were synchronized from the host
         // Synchronized anchors are added to the scene automatically by SynchronizationService
         for anchor in arView.scene.anchors {
@@ -233,17 +242,30 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
                     self.sphereAnchor = anchorEntity
                     self.sphereEntity = modelEntity
                     self.isSphereSynchronized = true // Mark as synchronized so we don't remove it
-                    
+
                     // IMPORTANT: Extract the ARAnchor so sendFrameToServer() can use it
-                    if let arAnchor = anchorEntity.anchorIdentifier {
-                        // Get the ARAnchor from the AR session
-                        if let anchor = arView.session.currentFrame?.anchors.first(where: { $0.identifier == arAnchor }) {
+                    // Try to get ARAnchor directly from AnchorEntity.anchor
+                    if let arAnchor = anchorEntity.anchor as? ARAnchor {
+                        self.sphereARAnchor = arAnchor
+                        print("Client: Got ARAnchor directly from AnchorEntity: \(arAnchor.transform.columns.3)")
+                    } else if let arAnchorId = anchorEntity.anchorIdentifier {
+                        // Fallback: Get the ARAnchor from the AR session using identifier
+                        // Try currentFrame first
+                        if let anchor = arView.session.currentFrame?.anchors.first(where: { $0.identifier == arAnchorId }) {
                             self.sphereARAnchor = anchor
-                            print("Client: Extracted ARAnchor from synchronized sphere")
+                            print("Client: Extracted ARAnchor from currentFrame using identifier: \(arAnchorId)")
+                        } else {
+                            print("Client: Failed to extract ARAnchor from synchronized sphere - anchorIdentifier: \(arAnchorId)")
+                            print("Client: Available anchor IDs: \(arView.session.currentFrame?.anchors.map { $0.identifier.uuidString } ?? [])")
                         }
+                    } else {
+                        print("Client: Synchronized sphere has no ARAnchor or anchorIdentifier")
                     }
-                    
-                    print("Client: Detected synchronized sphere anchor from host")
+
+                    print("Client: Detected synchronized sphere anchor from host at position: \(anchorEntity.transform.matrix.columns.3)")
+                    let worldTransform = anchorEntity.convert(transform: .identity, to: nil)
+                    let worldPos = worldTransform.matrix.columns.3
+                    print("Client: Sphere world position via convert(): \(worldPos)")
                     DispatchQueue.main.async {
                         self.statusMessage = "Sphere synchronized from host"
                         self.updateSphereColor()
@@ -342,6 +364,8 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         self.isSphereSynchronized = false // Host creates it, so it's not "synchronized from" anywhere
         
         print("Host: Sphere created at position: \(worldPosition) with SynchronizationComponent")
+        print("Host: ARAnchor transform: \(arAnchor.transform.columns.3)")
+        print("Host: AnchorEntity transform: \(anchor.transform.matrix.columns.3)")
         DispatchQueue.main.async {
             self.statusMessage = "Sphere placed at tapped location"
         }
@@ -844,10 +868,17 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
         if let sphereARAnchor = self.sphereARAnchor {
             // Host mode: use ARAnchor (more accurate as it's tracked by ARKit)
             sphereTransform = sphereARAnchor.transform
+//            print("Host: Using ARAnchor transform for distance calc")
         } else {
-            // Client mode: use synchronized AnchorEntity transform
-            sphereTransform = sphereAnchor.transform.matrix
+            // Client mode: for synchronized AnchorEntities, use convert() to get world transform
+            // The AnchorEntity.transform.matrix might be relative, not world absolute
+            let worldTransform = sphereAnchor.convert(transform: .identity, to: nil)
+            sphereTransform = worldTransform.matrix
+//            print("Client: Using world transform via convert() for distance calc: \(sphereTransform.columns.3)")
         }
+
+        // Debug: Print camera position
+//        print("Camera position: \(cameraTransform.columns.3)")
         
         // Convert both to OpenCV world space
         let F = float4x4(
@@ -988,16 +1019,18 @@ class ARSessionManager: NSObject, ObservableObject, URLSessionDelegate {
             // Camera transform in world coordinates
             let cameraTransform = camera.transform
             // Sphere transform in world coordinates
-            // For host: use ARAnchor transform; for client: use AnchorEntity transform matrix
+            // For host: use ARAnchor transform; for client: use synchronized AnchorEntity world transform
             let sphereTransform: simd_float4x4
             if let sphereARAnchor = self.sphereARAnchor {
                 // Host mode: use ARAnchor (more accurate as it's tracked by ARKit)
                 sphereTransform = sphereARAnchor.transform
                 print("Using ARAnchor transform (host mode)")
             } else {
-                // Client mode: use synchronized AnchorEntity transform
-                sphereTransform = sphereAnchor.transform.matrix
-                print("Using AnchorEntity transform matrix (client mode)")
+                // Client mode: for synchronized AnchorEntities, use convert() to get world transform
+                // The AnchorEntity.transform.matrix might be relative, not world absolute
+                let worldTransform = sphereAnchor.convert(transform: .identity, to: nil)
+                sphereTransform = worldTransform.matrix
+                print("Using AnchorEntity world transform via convert() (client mode): \(sphereTransform.columns.3)")
             }
             
             // Convert both to OpenCV world space
