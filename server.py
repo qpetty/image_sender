@@ -380,6 +380,57 @@ def health():
     """Health check endpoint."""
     return jsonify({"status": "ok", "message": "Server is running"})
 
+@app.route('/trigger_capture', methods=['POST', 'GET'])
+def trigger_capture_endpoint():
+    """HTTP endpoint to trigger a frame capture on all connected devices."""
+    try:
+        # Clean up stale connections before checking count
+        cleanup_stale_connections()
+        
+        num_clients = len(connected_clients)
+        
+        if num_clients > 0:
+            # Call the existing trigger_capture function
+            success = trigger_capture()
+            
+            if success:
+                # Get the capture_id that was just created
+                global last_trigger_time
+                if last_trigger_time:
+                    capture_id = last_trigger_time.strftime('%Y%m%d_%H%M%S_%f')
+                    return jsonify({
+                        "status": "success",
+                        "message": f"Capture triggered for {num_clients} client(s)",
+                        "capture_id": capture_id,
+                        "connected_clients": num_clients,
+                        "timestamp": last_trigger_time.isoformat()
+                    }), 200
+                else:
+                    return jsonify({
+                        "status": "success",
+                        "message": f"Capture triggered for {num_clients} client(s)",
+                        "connected_clients": num_clients
+                    }), 200
+            else:
+                return jsonify({
+                    "status": "error",
+                    "message": "Failed to trigger capture"
+                }), 500
+        else:
+            return jsonify({
+                "status": "error",
+                "message": "No clients connected",
+                "connected_clients": 0
+            }), 400
+    except Exception as e:
+        print(f"[Trigger Endpoint] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 # WebSocket event handlers
 @socketio.on('connect')
 def handle_connect():
@@ -692,6 +743,7 @@ if __name__ == '__main__':
     print(f"Endpoints:")
     print(f"  POST /upload_frame - Upload AR frame with image and metadata")
     print(f"  GET  /health - Health check")
+    print(f"  POST/GET /trigger_capture - Trigger frame capture on all connected devices")
     print(f"  WebSocket /socket.io - WebSocket connection for remote triggering")
     print()
     
