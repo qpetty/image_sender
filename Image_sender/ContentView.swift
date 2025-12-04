@@ -7,39 +7,323 @@
 
 import SwiftUI
 
+/// App mode enum for switching between ARKit and WebRTC streaming
+enum AppMode: String, CaseIterable {
+    case arkit = "ARKit"
+    case webrtc = "WebRTC"
+}
+
 struct ContentView: View {
     @StateObject private var sessionManager = ARSessionManager()
+    @StateObject private var webrtcManager = WebRTCStreamManager()
+    @State private var currentMode: AppMode = .arkit
+    @State private var showServerSettings = false
     
     var body: some View {
         GeometryReader { geometry in
             let isLandscape = geometry.size.width > geometry.size.height
             
             ZStack {
-                // AR View
-                ARViewContainer(sessionManager: sessionManager)
-                    .edgesIgnoringSafeArea(.all)
-                
-                // Camera to Sphere Distance (top left corner)
-                if let distance = sessionManager.cameraToSphereDistance {
-                    VStack {
-                        HStack {
-                            Text(String(format: "%.2f m", distance))
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.black.opacity(0.7))
-                                .cornerRadius(6)
-                            Spacer()
-                        }
-                        Spacer()
-                    }
-                    .padding(.top, 10)
-                    .padding(.leading, 10)
+                // Main content based on mode
+                switch currentMode {
+                case .arkit:
+                    arkitView(isLandscape: isLandscape, geometry: geometry)
+                case .webrtc:
+                    webrtcView(isLandscape: isLandscape, geometry: geometry)
                 }
                 
-                // Control Panel
-                if isLandscape {
+                // Mode Switcher (top center)
+                VStack {
+                    modeSwitcher
+                        .padding(.top, 10)
+                    Spacer()
+                }
+            }
+        }
+    }
+    
+    // MARK: - Mode Switcher
+    private var modeSwitcher: some View {
+        HStack(spacing: 0) {
+            ForEach(AppMode.allCases, id: \.self) { mode in
+                Button(action: {
+                    switchMode(to: mode)
+                }) {
+                    Text(mode.rawValue)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(currentMode == mode ? .white : .white.opacity(0.6))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(currentMode == mode ? Color.blue : Color.clear)
+                }
+            }
+        }
+        .background(Color.black.opacity(0.7))
+        .cornerRadius(8)
+    }
+    
+    private func switchMode(to newMode: AppMode) {
+        guard newMode != currentMode else { return }
+        
+        // Stop current mode
+        switch currentMode {
+        case .arkit:
+            if sessionManager.isSessionRunning {
+                sessionManager.stopARSession()
+            }
+        case .webrtc:
+            if webrtcManager.isStreaming {
+                webrtcManager.stopStreaming()
+            }
+        }
+        
+        currentMode = newMode
+    }
+    
+    // MARK: - WebRTC View
+    @ViewBuilder
+    private func webrtcView(isLandscape: Bool, geometry: GeometryProxy) -> some View {
+        ZStack {
+            // Camera Preview
+            WebRTCViewContainer(streamManager: webrtcManager)
+                .edgesIgnoringSafeArea(.all)
+            
+            // Overlay UI
+            VStack {
+                Spacer()
+                    .frame(height: 50) // Space for mode switcher
+                
+                // Status indicators and settings button
+                HStack {
+                    // Connection status
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(webrtcStatusColor)
+                            .frame(width: 10, height: 10)
+                        Text(webrtcStatusText)
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    
+                    Spacer()
+                    
+                    // Settings button
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showServerSettings.toggle()
+                        }
+                    }) {
+                        Image(systemName: showServerSettings ? "gearshape.fill" : "gearshape")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(8)
+                    }
+                    .disabled(webrtcManager.isStreaming)
+                    .opacity(webrtcManager.isStreaming ? 0.5 : 1.0)
+                    
+                    // Signaling status
+                    if webrtcManager.isStreaming {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(webrtcManager.signalingConnected ? Color.green : Color.yellow)
+                                .frame(width: 8, height: 8)
+                            Text(webrtcManager.signalingConnected ? "Signal OK" : "Connecting...")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                
+                // Server settings panel
+                if showServerSettings {
+                    VStack(spacing: 12) {
+                        Text("Signaling Server")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        HStack(spacing: 8) {
+                            // Host input
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Host")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("192.168.1.100", text: $webrtcManager.serverHost)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .keyboardType(.numbersAndPunctuation)
+                            }
+                            .frame(maxWidth: .infinity)
+                            
+                            // Port input
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Port")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("8080", text: $webrtcManager.serverPort)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .keyboardType(.numberPad)
+                            }
+                            .frame(width: 80)
+                        }
+                        
+                        // Secure connection toggle
+                        HStack {
+                            Toggle(isOn: $webrtcManager.useSecureConnection) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: webrtcManager.useSecureConnection ? "lock.fill" : "lock.open")
+                                        .font(.caption)
+                                    Text(webrtcManager.useSecureConnection ? "WSS (Secure)" : "WS (Insecure)")
+                                        .font(.caption)
+                                }
+                                .foregroundColor(webrtcManager.useSecureConnection ? .green : .orange)
+                            }
+                            .toggleStyle(SwitchToggleStyle(tint: .green))
+                        }
+                        
+                        // Camera ID selector
+                        HStack {
+                            Text("Camera ID")
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.6))
+                            Spacer()
+                            Picker("Camera", selection: $webrtcManager.cameraId) {
+                                Text("Camera 0").tag(0)
+                                Text("Camera 1").tag(1)
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .frame(width: 160)
+                        }
+                        
+                        // Current server display
+                        let scheme = webrtcManager.useSecureConnection ? "wss" : "ws"
+                        Text("→ \(scheme)://\(webrtcManager.serverHost):\(webrtcManager.serverPort) (cam \(webrtcManager.cameraId))")
+                            .font(.caption2)
+                            .foregroundColor(webrtcManager.useSecureConnection ? .green : .orange)
+                    }
+                    .padding(16)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(12)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                
+                Spacer()
+                
+                // Status message
+                Text(webrtcManager.statusMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(10)
+                
+                // Control button
+                Button(action: {
+                    // Hide keyboard if showing
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    // Hide settings when starting stream
+                    if !webrtcManager.isStreaming {
+                        showServerSettings = false
+                    }
+                    
+                    if webrtcManager.isStreaming {
+                        webrtcManager.stopStreaming()
+                    } else {
+                        webrtcManager.startStreaming()
+                    }
+                }) {
+                    VStack {
+                        Image(systemName: webrtcManager.isStreaming ? "video.slash.fill" : "video.fill")
+                            .font(.system(size: 28))
+                        Text(webrtcManager.isStreaming ? "Stop Stream" : "Start Stream")
+                            .font(.caption)
+                    }
+                    .frame(width: 100, height: 70)
+                    .background(webrtcManager.isStreaming ? Color.red : Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .padding(.bottom, 30)
+            }
+        }
+        .onTapGesture {
+            // Dismiss keyboard when tapping outside
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    
+    private var webrtcStatusColor: Color {
+        switch webrtcManager.connectionStatus {
+        case .connected:
+            return .green
+        case .connecting:
+            return .yellow
+        case .disconnected:
+            return .gray
+        case .error:
+            return .red
+        }
+    }
+    
+    private var webrtcStatusText: String {
+        switch webrtcManager.connectionStatus {
+        case .connected:
+            return "Streaming"
+        case .connecting:
+            return "Connecting..."
+        case .disconnected:
+            return "Ready"
+        case .error(let msg):
+            return "Error: \(msg)"
+        }
+    }
+    
+    // MARK: - ARKit View
+    @ViewBuilder
+    private func arkitView(isLandscape: Bool, geometry: GeometryProxy) -> some View {
+        ZStack {
+            // AR View
+            ARViewContainer(sessionManager: sessionManager)
+                .edgesIgnoringSafeArea(.all)
+            
+            // Camera to Sphere Distance (top left corner)
+            if let distance = sessionManager.cameraToSphereDistance {
+                VStack {
+                    HStack {
+                        Text(String(format: "%.2f m", distance))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(6)
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .padding(.top, 50) // Account for mode switcher
+                .padding(.leading, 10)
+            }
+            
+            // Control Panel
+            if isLandscape {
                     // Landscape layout: buttons on right side
                     HStack {
                         Spacer()
@@ -320,7 +604,6 @@ struct ContentView: View {
                         }
                     }
                 }
-            }
         }
     }
     

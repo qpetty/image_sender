@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		5A63EA842EC68C2400003406 /* SocketIO in Frameworks */ = {isa = PBXBuildFile; productRef = 5A63EA832EC68C2400003406 /* SocketIO */; };
+		5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 5AWEBRTC002EC68C2400003406 /* WebRTC */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +42,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5A63EA842EC68C2400003406 /* SocketIO in Frameworks */,
+				5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -84,6 +86,7 @@
 			name = Image_sender;
 			packageProductDependencies = (
 				5A63EA832EC68C2400003406 /* SocketIO */,
+				5AWEBRTC002EC68C2400003406 /* WebRTC */,
 			);
 			productName = Image_sender;
 			productReference = 5A2DCEDB2EC2A54D0010CE4D /* Image_sender.app */;
@@ -115,6 +118,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				5A63EA822EC68C2400003406 /* XCRemoteSwiftPackageReference "socket" */,
+				5ACC104E2EE13D6A00EE38EA /* XCRemoteSwiftPackageReference "WebRTC" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 5A2DCEDC2EC2A54D0010CE4D /* Products */;
@@ -372,6 +376,14 @@
 				kind = branch;
 			};
 		};
+		5ACC104E2EE13D6A00EE38EA /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 125.0.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -379,6 +391,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 5A63EA822EC68C2400003406 /* XCRemoteSwiftPackageReference "socket" */;
 			productName = SocketIO;
+		};
+		5AWEBRTC002EC68C2400003406 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5ACC104E2EE13D6A00EE38EA /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
