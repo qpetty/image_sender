@@ -161,20 +161,57 @@ class WebRTCStreamManager: NSObject, ObservableObject {
             return
         }
         
-        // Find format close to 1280x720
+        // Find the best high-quality format
+        // Prefer 1920x1080 (1080p) for better quality, fall back to 1280x720 (720p)
         let formats = RTCCameraVideoCapturer.supportedFormats(for: backCamera)
-        let targetWidth: Int32 = 1280
-        let targetHeight: Int32 = 720
+        let targetWidth: Int32 = 1920
+        let targetHeight: Int32 = 1080
+        let fallbackWidth: Int32 = 1280
+        let fallbackHeight: Int32 = 720
         
         var selectedFormat: AVCaptureDevice.Format?
         var currentDiff = Int32.max
         
+        // First, try to find exact 1080p match
         for format in formats {
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            let diff = abs(dimensions.width - targetWidth) + abs(dimensions.height - targetHeight)
-            if diff < currentDiff {
-                currentDiff = diff
+            if dimensions.width == targetWidth && dimensions.height == targetHeight {
                 selectedFormat = format
+                currentDiff = 0
+                break
+            }
+        }
+        
+        // If no exact 1080p, look for the best format >= 720p (prefer higher res)
+        if selectedFormat == nil {
+            var bestHighResFormat: AVCaptureDevice.Format?
+            var bestHighResPixels: Int32 = 0
+            
+            for format in formats {
+                let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                let pixels = dimensions.width * dimensions.height
+                
+                // Only consider formats >= 720p
+                if dimensions.width >= fallbackWidth && dimensions.height >= fallbackHeight {
+                    if pixels > bestHighResPixels {
+                        bestHighResPixels = pixels
+                        bestHighResFormat = format
+                    }
+                }
+            }
+            
+            if let highRes = bestHighResFormat {
+                selectedFormat = highRes
+            } else {
+                // Fall back to closest to 720p if no high-res format available
+                for format in formats {
+                    let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+                    let diff = abs(dimensions.width - fallbackWidth) + abs(dimensions.height - fallbackHeight)
+                    if diff < currentDiff {
+                        currentDiff = diff
+                        selectedFormat = format
+                    }
+                }
             }
         }
         
@@ -186,7 +223,7 @@ class WebRTCStreamManager: NSObject, ObservableObject {
         let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
         print("[WebRTC] Selected camera format: \(dimensions.width)x\(dimensions.height)")
         
-        // Get frame rate
+        // Get frame rate - target 30fps for good quality/performance balance
         var maxFrameRate: Float64 = 30.0
         for range in format.videoSupportedFrameRateRanges {
             maxFrameRate = max(maxFrameRate, range.maxFrameRate)
@@ -201,7 +238,7 @@ class WebRTCStreamManager: NSObject, ObservableObject {
                     self?.connectionStatus = .error("Camera error")
                 }
             } else {
-                print("[WebRTC] Camera capture started")
+                print("[WebRTC] Camera capture started at \(targetFPS)fps")
             }
         }
         
@@ -214,6 +251,35 @@ class WebRTCStreamManager: NSObject, ObservableObject {
         }
         
         print("[WebRTC] Camera setup complete")
+    }
+    
+    // MARK: - Video Quality Configuration
+    /// Configure high-quality video encoding parameters on the sender
+    private func configureVideoQuality() {
+        guard let pc = peerConnection else { return }
+        
+        // Find the video sender
+        if let videoSender = pc.senders.first(where: { $0.track?.kind == "video" }) {
+            let params = videoSender.parameters
+            
+            // Ensure we have at least one encoding
+            if params.encodings.isEmpty {
+                let encoding = RTCRtpEncodingParameters()
+                params.encodings = [encoding]
+            }
+            
+            // Set high bitrate for near-lossless quality
+            params.encodings[0].maxBitrateBps = NSNumber(value: 15_000_000)  // 15 Mbps
+            
+            // Prevent resolution downscaling
+            params.encodings[0].scaleResolutionDownBy = NSNumber(value: 1.0)
+            
+            // Set max framerate
+            params.encodings[0].maxFramerate = NSNumber(value: 30)
+            
+            videoSender.parameters = params
+            print("[WebRTC] Configured video quality: maxBitrate=15Mbps, scaleDown=1.0, maxFPS=30")
+        }
     }
     
     // MARK: - Raw WebSocket Signaling
@@ -424,6 +490,9 @@ class WebRTCStreamManager: NSObject, ObservableObject {
             pc.add(videoTrack, streamIds: ["stream0"])
             print("[WebRTC] Added video track to peer connection")
         }
+        
+        // Configure high-quality video encoding
+        configureVideoQuality()
         
         // Create offer
         let constraints = RTCMediaConstraints(
