@@ -7,15 +7,17 @@
 
 import SwiftUI
 
-/// App mode enum for switching between ARKit and WebRTC streaming
+/// App mode enum for switching between ARKit, WebRTC, and RTMP streaming
 enum AppMode: String, CaseIterable {
     case arkit = "ARKit"
     case webrtc = "WebRTC"
+    case rtmp = "RTMP"
 }
 
 struct ContentView: View {
     @StateObject private var sessionManager = ARSessionManager()
     @StateObject private var webrtcManager = WebRTCStreamManager()
+    @StateObject private var rtmpManager = RTMPStreamManager()
     @State private var currentMode: AppMode = .arkit
     @State private var showServerSettings = false
     
@@ -30,6 +32,8 @@ struct ContentView: View {
                     arkitView(isLandscape: isLandscape, geometry: geometry)
                 case .webrtc:
                     webrtcView(isLandscape: isLandscape, geometry: geometry)
+                case .rtmp:
+                    rtmpView(isLandscape: isLandscape, geometry: geometry)
                 }
                 
                 // Mode Switcher (top center)
@@ -74,6 +78,10 @@ struct ContentView: View {
         case .webrtc:
             if webrtcManager.isStreaming {
                 webrtcManager.stopStreaming()
+            }
+        case .rtmp:
+            if rtmpManager.isStreaming {
+                rtmpManager.stopStreaming()
             }
         }
         
@@ -266,6 +274,227 @@ struct ContentView: View {
         .onTapGesture {
             // Dismiss keyboard when tapping outside
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    
+    // MARK: - RTMP View
+    @ViewBuilder
+    private func rtmpView(isLandscape: Bool, geometry: GeometryProxy) -> some View {
+        ZStack {
+            // Camera Preview
+            RTMPViewContainer(streamManager: rtmpManager)
+                .edgesIgnoringSafeArea(.all)
+            
+            // Overlay UI
+            VStack {
+                Spacer()
+                    .frame(height: 50) // Space for mode switcher
+                
+                // Status indicators and settings button
+                HStack {
+                    // Connection status
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(rtmpStatusColor)
+                            .frame(width: 10, height: 10)
+                        Text(rtmpStatusText)
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    
+                    Spacer()
+                    
+                    // Settings button
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showServerSettings.toggle()
+                        }
+                    }) {
+                        Image(systemName: showServerSettings ? "gearshape.fill" : "gearshape")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(8)
+                    }
+                    .disabled(rtmpManager.isStreaming)
+                    .opacity(rtmpManager.isStreaming ? 0.5 : 1.0)
+                    
+                    // Connection indicator
+                    if rtmpManager.isStreaming {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(rtmpManager.isConnected ? Color.green : Color.yellow)
+                                .frame(width: 8, height: 8)
+                            Text(rtmpManager.isConnected ? "Connected" : "Connecting...")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                
+                // Server settings panel
+                if showServerSettings {
+                    VStack(spacing: 12) {
+                        Text("RTMP Server")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        // RTMP URL input
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("RTMP URL")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.6))
+                            TextField("rtmp://server:1935/live", text: $rtmpManager.rtmpURL)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .font(.system(size: 14, design: .monospaced))
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                                .keyboardType(.URL)
+                        }
+                        
+                        // Stream key input
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Stream Key")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.6))
+                            TextField("stream", text: $rtmpManager.streamKey)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+                                .font(.system(size: 14, design: .monospaced))
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                        }
+                        
+                        // Bitrate settings
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Video Bitrate (kbps)")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                Picker("Video", selection: $rtmpManager.videoBitrate) {
+                                    Text("2000").tag(2000)
+                                    Text("4000").tag(4000)
+                                    Text("6000").tag(6000)
+                                    Text("8000").tag(8000)
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Audio (kbps)")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                Picker("Audio", selection: $rtmpManager.audioBitrate) {
+                                    Text("64").tag(64)
+                                    Text("128").tag(128)
+                                    Text("192").tag(192)
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                            }
+                            .frame(width: 120)
+                        }
+                        
+                        // Current server display
+                        let displayURL = rtmpManager.rtmpURL.hasSuffix("/") 
+                            ? "\(rtmpManager.rtmpURL)\(rtmpManager.streamKey)" 
+                            : "\(rtmpManager.rtmpURL)/\(rtmpManager.streamKey)"
+                        Text("→ \(displayURL)")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .padding(16)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(12)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                
+                Spacer()
+                
+                // Status message
+                Text(rtmpManager.statusMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(10)
+                
+                // Control button
+                Button(action: {
+                    // Hide keyboard if showing
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    // Hide settings when starting stream
+                    if !rtmpManager.isStreaming {
+                        showServerSettings = false
+                    }
+                    
+                    if rtmpManager.isStreaming {
+                        rtmpManager.stopStreaming()
+                    } else {
+                        rtmpManager.startStreaming()
+                    }
+                }) {
+                    VStack {
+                        Image(systemName: rtmpManager.isStreaming ? "antenna.radiowaves.left.and.right.slash" : "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 28))
+                        Text(rtmpManager.isStreaming ? "Stop Stream" : "Start Stream")
+                            .font(.caption)
+                    }
+                    .frame(width: 100, height: 70)
+                    .background(rtmpManager.isStreaming ? Color.red : Color.orange)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .padding(.bottom, 30)
+            }
+        }
+        .onTapGesture {
+            // Dismiss keyboard when tapping outside
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    
+    private var rtmpStatusColor: Color {
+        switch rtmpManager.connectionStatus {
+        case .publishing:
+            return .green
+        case .connected:
+            return .blue
+        case .connecting:
+            return .yellow
+        case .disconnected:
+            return .gray
+        case .error:
+            return .red
+        }
+    }
+    
+    private var rtmpStatusText: String {
+        switch rtmpManager.connectionStatus {
+        case .publishing:
+            return "Publishing"
+        case .connected:
+            return "Connected"
+        case .connecting:
+            return "Connecting..."
+        case .disconnected:
+            return "Ready"
+        case .error(let msg):
+            return "Error: \(msg)"
         }
     }
     
