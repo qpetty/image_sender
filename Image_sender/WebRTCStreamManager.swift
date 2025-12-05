@@ -77,6 +77,9 @@ class WebRTCStreamManager: NSObject, ObservableObject {
     // MARK: - Camera Preview
     private var localVideoView: RTCMTLVideoView?
     
+    // MARK: - Orientation Observer
+    private var orientationObserver: NSObjectProtocol?
+    
     // MARK: - ICE Servers (STUN/TURN)
     private let iceServers: [RTCIceServer] = [
         RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
@@ -112,6 +115,64 @@ class WebRTCStreamManager: NSObject, ObservableObject {
         )
         
         print("[WebRTC] Initialized peer connection factory")
+    }
+    
+    // MARK: - Screen Lock Prevention
+    private func preventScreenLock(_ prevent: Bool) {
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = prevent
+            print("[WebRTC] Screen lock prevention: \(prevent ? "enabled" : "disabled")")
+        }
+    }
+    
+    // MARK: - Orientation Handling
+    private func startOrientationObserver() {
+        // Enable device orientation notifications
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        
+        // Log initial orientation
+        logCurrentOrientation()
+        
+        // Listen for orientation changes
+        orientationObserver = NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleOrientationChange()
+        }
+        print("[WebRTC] Orientation observer started")
+    }
+    
+    private func stopOrientationObserver() {
+        if let observer = orientationObserver {
+            NotificationCenter.default.removeObserver(observer)
+            orientationObserver = nil
+        }
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
+        print("[WebRTC] Orientation observer stopped")
+    }
+    
+    private func logCurrentOrientation() {
+        let deviceOrientation = UIDevice.current.orientation
+        let orientationName: String
+        switch deviceOrientation {
+        case .portrait: orientationName = "Portrait"
+        case .portraitUpsideDown: orientationName = "Portrait Upside Down"
+        case .landscapeLeft: orientationName = "Landscape Left"
+        case .landscapeRight: orientationName = "Landscape Right"
+        case .faceUp: orientationName = "Face Up"
+        case .faceDown: orientationName = "Face Down"
+        default: orientationName = "Unknown"
+        }
+        print("[WebRTC] Current device orientation: \(orientationName)")
+    }
+    
+    private func handleOrientationChange() {
+        // RTCCameraVideoCapturer automatically handles rotation via AVCaptureSession
+        // The rotation metadata is embedded in video frames
+        // This observer is mainly for logging and potential future needs
+        logCurrentOrientation()
     }
     
     private func createPeerConnection() -> RTCPeerConnection? {
@@ -581,6 +642,12 @@ class WebRTCStreamManager: NSObject, ObservableObject {
         // Setup camera first
         setupCamera()
         
+        // Start orientation observer for logging
+        startOrientationObserver()
+        
+        // Prevent screen from locking during stream
+        preventScreenLock(true)
+        
         // Then connect to signaling server
         connectSignaling()
     }
@@ -589,6 +656,12 @@ class WebRTCStreamManager: NSObject, ObservableObject {
         guard isStreaming else { return }
         
         print("[WebRTC] Stopping stream")
+        
+        // Stop orientation observer
+        stopOrientationObserver()
+        
+        // Re-enable screen lock
+        preventScreenLock(false)
         
         videoCapturer?.stopCapture()
         

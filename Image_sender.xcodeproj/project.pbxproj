@@ -10,6 +10,7 @@
 		5A63EA842EC68C2400003406 /* SocketIO in Frameworks */ = {isa = PBXBuildFile; productRef = 5A63EA832EC68C2400003406 /* SocketIO */; };
 		5AHAISHIN003EC68C2400003406 /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5AHAISHIN002EC68C2400003406 /* HaishinKit */; };
 		5ARTMPHK003EC68C2400003406 /* RTMPHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5ARTMPHK002EC68C2400003406 /* RTMPHaishinKit */; };
+		5ASRTHK003EC68C2400003406 /* SRTHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5ASRTHK002EC68C2400003406 /* SRTHaishinKit */; };
 		5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 5AWEBRTC002EC68C2400003406 /* WebRTC */; };
 /* End PBXBuildFile section */
 
@@ -47,6 +48,7 @@
 				5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */,
 				5AHAISHIN003EC68C2400003406 /* HaishinKit in Frameworks */,
 				5ARTMPHK003EC68C2400003406 /* RTMPHaishinKit in Frameworks */,
+				5ASRTHK003EC68C2400003406 /* SRTHaishinKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -93,6 +95,7 @@
 				5AWEBRTC002EC68C2400003406 /* WebRTC */,
 				5AHAISHIN002EC68C2400003406 /* HaishinKit */,
 				5ARTMPHK002EC68C2400003406 /* RTMPHaishinKit */,
+				5ASRTHK002EC68C2400003406 /* SRTHaishinKit */,
 			);
 			productName = Image_sender;
 			productReference = 5A2DCEDB2EC2A54D0010CE4D /* Image_sender.app */;
@@ -416,6 +419,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 5ACC10852EE21AA400EE38EA /* XCRemoteSwiftPackageReference "HaishinKit" */;
 			productName = RTMPHaishinKit;
+		};
+		5ASRTHK002EC68C2400003406 /* SRTHaishinKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5ACC10852EE21AA400EE38EA /* XCRemoteSwiftPackageReference "HaishinKit" */;
+			productName = SRTHaishinKit;
 		};
 		5AWEBRTC002EC68C2400003406 /* WebRTC */ = {
 			isa = XCSwiftPackageProductDependency;

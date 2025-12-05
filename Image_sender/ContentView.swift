@@ -7,17 +7,19 @@
 
 import SwiftUI
 
-/// App mode enum for switching between ARKit, WebRTC, and RTMP streaming
+/// App mode enum for switching between ARKit, WebRTC, RTMP, and SRT streaming
 enum AppMode: String, CaseIterable {
     case arkit = "ARKit"
     case webrtc = "WebRTC"
     case rtmp = "RTMP"
+    case srt = "SRT"
 }
 
 struct ContentView: View {
     @StateObject private var sessionManager = ARSessionManager()
     @StateObject private var webrtcManager = WebRTCStreamManager()
     @StateObject private var rtmpManager = RTMPStreamManager()
+    @StateObject private var srtManager = SRTStreamManager()
     @State private var currentMode: AppMode = .arkit
     @State private var showServerSettings = false
     
@@ -34,6 +36,8 @@ struct ContentView: View {
                     webrtcView(isLandscape: isLandscape, geometry: geometry)
                 case .rtmp:
                     rtmpView(isLandscape: isLandscape, geometry: geometry)
+                case .srt:
+                    srtView(isLandscape: isLandscape, geometry: geometry)
                 }
                 
                 // Mode Switcher (top center)
@@ -82,6 +86,10 @@ struct ContentView: View {
         case .rtmp:
             if rtmpManager.isStreaming {
                 rtmpManager.stopStreaming()
+            }
+        case .srt:
+            if srtManager.isStreaming {
+                srtManager.stopStreaming()
             }
         }
         
@@ -468,6 +476,193 @@ struct ContentView: View {
         }
     }
     
+    // MARK: - SRT View
+    @ViewBuilder
+    private func srtView(isLandscape: Bool, geometry: GeometryProxy) -> some View {
+        ZStack {
+            // Camera Preview
+            SRTViewContainer(streamManager: srtManager)
+                .edgesIgnoringSafeArea(.all)
+            
+            // Overlay UI
+            VStack {
+                Spacer()
+                    .frame(height: 50) // Space for mode switcher
+                
+                // Status indicators and settings button
+                HStack {
+                    // Connection status
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(srtStatusColor)
+                            .frame(width: 10, height: 10)
+                        Text(srtStatusText)
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    
+                    Spacer()
+                    
+                    // Settings button
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showServerSettings.toggle()
+                        }
+                    }) {
+                        Image(systemName: showServerSettings ? "gearshape.fill" : "gearshape")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(8)
+                    }
+                    .disabled(srtManager.isStreaming)
+                    .opacity(srtManager.isStreaming ? 0.5 : 1.0)
+                    
+                    // Connection indicator
+                    if srtManager.isStreaming {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(srtManager.isConnected ? Color.green : Color.yellow)
+                                .frame(width: 8, height: 8)
+                            Text(srtManager.isConnected ? "Connected" : "Connecting...")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                
+                // Server settings panel
+                if showServerSettings {
+                    VStack(spacing: 12) {
+                        Text("SRT Server")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        // Host and Port row
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Host")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("192.168.1.100", text: $srtManager.serverHost)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .keyboardType(.numbersAndPunctuation)
+                            }
+                            .frame(maxWidth: .infinity)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Port")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("9000", text: $srtManager.serverPort)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .keyboardType(.numberPad)
+                            }
+                            .frame(width: 80)
+                        }
+                        
+                        // Stream ID and Passphrase row
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Stream ID (optional)")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("stream_name", text: $srtManager.streamId)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                            }
+                            .frame(maxWidth: .infinity)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Passphrase")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                SecureField("optional", text: $srtManager.passphrase)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                            }
+                            .frame(width: 120)
+                        }
+                        
+                        // Current server display
+                        let displayURL = "srt://\(srtManager.serverHost):\(srtManager.serverPort)"
+                        Text("→ \(displayURL)")
+                            .font(.caption2)
+                            .foregroundColor(.cyan)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .padding(16)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(12)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                
+                Spacer()
+                
+                // Status message
+                Text(srtManager.statusMessage)
+                    .font(.subheadline)
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(10)
+                
+                // Control button
+                Button(action: {
+                    // Hide keyboard if showing
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    // Hide settings when starting stream
+                    if !srtManager.isStreaming {
+                        showServerSettings = false
+                    }
+                    
+                    if srtManager.isStreaming {
+                        srtManager.stopStreaming()
+                    } else {
+                        srtManager.startStreaming()
+                    }
+                }) {
+                    VStack {
+                        Image(systemName: srtManager.isStreaming ? "bolt.horizontal.circle.fill" : "bolt.horizontal.circle")
+                            .font(.system(size: 28))
+                        Text(srtManager.isStreaming ? "Stop Stream" : "Start Stream")
+                            .font(.caption)
+                    }
+                    .frame(width: 100, height: 70)
+                    .background(srtManager.isStreaming ? Color.red : Color.cyan)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .padding(.bottom, 30)
+            }
+        }
+        .onTapGesture {
+            // Dismiss keyboard when tapping outside
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    
     private var rtmpStatusColor: Color {
         switch rtmpManager.connectionStatus {
         case .publishing:
@@ -485,6 +680,36 @@ struct ContentView: View {
     
     private var rtmpStatusText: String {
         switch rtmpManager.connectionStatus {
+        case .publishing:
+            return "Publishing"
+        case .connected:
+            return "Connected"
+        case .connecting:
+            return "Connecting..."
+        case .disconnected:
+            return "Ready"
+        case .error(let msg):
+            return "Error: \(msg)"
+        }
+    }
+    
+    private var srtStatusColor: Color {
+        switch srtManager.connectionStatus {
+        case .publishing:
+            return .green
+        case .connected:
+            return .blue
+        case .connecting:
+            return .yellow
+        case .disconnected:
+            return .gray
+        case .error:
+            return .red
+        }
+    }
+    
+    private var srtStatusText: String {
+        switch srtManager.connectionStatus {
         case .publishing:
             return "Publishing"
         case .connected:
