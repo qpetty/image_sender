@@ -7,12 +7,13 @@
 
 import SwiftUI
 
-/// App mode enum for switching between ARKit, WebRTC, RTMP, and SRT streaming
+/// App mode enum for switching between ARKit, WebRTC, RTMP, SRT, and H.264 TCP streaming
 enum AppMode: String, CaseIterable {
     case arkit = "ARKit"
     case webrtc = "WebRTC"
     case rtmp = "RTMP"
     case srt = "SRT"
+    case h264tcp = "H.264"
 }
 
 struct ContentView: View {
@@ -20,6 +21,7 @@ struct ContentView: View {
     @StateObject private var webrtcManager = WebRTCStreamManager()
     @StateObject private var rtmpManager = RTMPStreamManager()
     @StateObject private var srtManager = SRTStreamManager()
+    @StateObject private var h264tcpManager = H264TCPStreamManager()
     @State private var currentMode: AppMode = .arkit
     @State private var showServerSettings = false
     
@@ -38,6 +40,8 @@ struct ContentView: View {
                     rtmpView(isLandscape: isLandscape, geometry: geometry)
                 case .srt:
                     srtView(isLandscape: isLandscape, geometry: geometry)
+                case .h264tcp:
+                    h264tcpView(isLandscape: isLandscape, geometry: geometry)
                 }
                 
                 // Mode Switcher (top center)
@@ -90,6 +94,10 @@ struct ContentView: View {
         case .srt:
             if srtManager.isStreaming {
                 srtManager.stopStreaming()
+            }
+        case .h264tcp:
+            if h264tcpManager.isStreaming {
+                h264tcpManager.stopStreaming()
             }
         }
         
@@ -660,6 +668,246 @@ struct ContentView: View {
         .onTapGesture {
             // Dismiss keyboard when tapping outside
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    
+    // MARK: - H.264 TCP View
+    @ViewBuilder
+    private func h264tcpView(isLandscape: Bool, geometry: GeometryProxy) -> some View {
+        ZStack {
+            // Camera Preview
+            H264TCPViewContainer(streamManager: h264tcpManager)
+                .edgesIgnoringSafeArea(.all)
+            
+            // Overlay UI
+            VStack {
+                Spacer()
+                    .frame(height: 50) // Space for mode switcher
+                
+                // Status indicators and settings button
+                HStack {
+                    // Connection status
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(h264tcpStatusColor)
+                            .frame(width: 10, height: 10)
+                        Text(h264tcpStatusText)
+                            .font(.caption)
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    
+                    Spacer()
+                    
+                    // Settings button
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showServerSettings.toggle()
+                        }
+                    }) {
+                        Image(systemName: showServerSettings ? "gearshape.fill" : "gearshape")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.7))
+                            .cornerRadius(8)
+                    }
+                    .disabled(h264tcpManager.isStreaming)
+                    .opacity(h264tcpManager.isStreaming ? 0.5 : 1.0)
+                    
+                    // Stats indicator when streaming
+                    if h264tcpManager.isStreaming {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(h264tcpManager.isConnected ? Color.green : Color.yellow)
+                                .frame(width: 8, height: 8)
+                            Text("\(h264tcpManager.framesSent) frames")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                
+                // Server settings panel
+                if showServerSettings {
+                    VStack(spacing: 12) {
+                        Text("H.264 TCP Server")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        // Host and Port row
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("GStreamer Host")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("192.168.1.100", text: $h264tcpManager.serverHost)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                                    .keyboardType(.numbersAndPunctuation)
+                            }
+                            .frame(maxWidth: .infinity)
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Port")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                TextField("5000", text: $h264tcpManager.serverPort)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .font(.system(size: 14, design: .monospaced))
+                                    .keyboardType(.numberPad)
+                            }
+                            .frame(width: 80)
+                        }
+                        
+                        // Bitrate and keyframe settings
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Video Bitrate (kbps)")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                Picker("Bitrate", selection: $h264tcpManager.videoBitrate) {
+                                    Text("2000").tag(2000)
+                                    Text("4000").tag(4000)
+                                    Text("6000").tag(6000)
+                                    Text("8000").tag(8000)
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Keyframe")
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.6))
+                                Picker("Keyframe", selection: $h264tcpManager.keyframeInterval) {
+                                    Text("15").tag(15)
+                                    Text("30").tag(30)
+                                    Text("60").tag(60)
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                            }
+                            .frame(width: 120)
+                        }
+                        
+                        // GStreamer pipeline hint
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("GStreamer receiver (MPEG-TS):")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.6))
+                            Text("tcpserversrc port=\(h264tcpManager.serverPort) ! tsdemux ! h264parse ! avdec_h264 ! autovideosink")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.green)
+                                .lineLimit(2)
+                        }
+                        
+                        // Current server display
+                        Text("→ tcp://\(h264tcpManager.serverHost):\(h264tcpManager.serverPort)")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .padding(16)
+                    .background(Color.black.opacity(0.85))
+                    .cornerRadius(12)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                
+                Spacer()
+                
+                // Status message and stats
+                VStack(spacing: 8) {
+                    Text(h264tcpManager.statusMessage)
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                    
+                    if h264tcpManager.isStreaming {
+                        let mbSent = Double(h264tcpManager.bytesSent) / 1_000_000.0
+                        Text(String(format: "%.2f MB sent", mbSent))
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.black.opacity(0.7))
+                .cornerRadius(10)
+                
+                // Control button
+                Button(action: {
+                    // Hide keyboard if showing
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    // Hide settings when starting stream
+                    if !h264tcpManager.isStreaming {
+                        showServerSettings = false
+                    }
+                    
+                    if h264tcpManager.isStreaming {
+                        h264tcpManager.stopStreaming()
+                    } else {
+                        h264tcpManager.startStreaming()
+                    }
+                }) {
+                    VStack {
+                        Image(systemName: h264tcpManager.isStreaming ? "stop.circle.fill" : "play.circle.fill")
+                            .font(.system(size: 28))
+                        Text(h264tcpManager.isStreaming ? "Stop Stream" : "Start Stream")
+                            .font(.caption)
+                    }
+                    .frame(width: 100, height: 70)
+                    .background(h264tcpManager.isStreaming ? Color.red : Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .padding(.bottom, 30)
+            }
+        }
+        .onTapGesture {
+            // Dismiss keyboard when tapping outside
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
+    }
+    
+    private var h264tcpStatusColor: Color {
+        switch h264tcpManager.connectionStatus {
+        case .streaming:
+            return .green
+        case .connected:
+            return .blue
+        case .connecting:
+            return .yellow
+        case .disconnected:
+            return .gray
+        case .error:
+            return .red
+        }
+    }
+    
+    private var h264tcpStatusText: String {
+        switch h264tcpManager.connectionStatus {
+        case .streaming:
+            return "Streaming"
+        case .connected:
+            return "Connected"
+        case .connecting:
+            return "Connecting..."
+        case .disconnected:
+            return "Ready"
+        case .error(let msg):
+            return "Error: \(msg)"
         }
     }
     
