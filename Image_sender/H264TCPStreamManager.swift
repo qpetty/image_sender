@@ -727,7 +727,7 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         if framesSent < 5 {
             let ptsMs = Double(presentationTime.value) / Double(presentationTime.timescale) * 1000.0
-            print("[H264TCP] capture PTS ms=\(String(format: \"%.3f\", ptsMs)) timescale=\(presentationTime.timescale)")
+            print("[H264TCP] capture PTS ms=\(String(format: "%.3f", ptsMs)) timescale=\(presentationTime.timescale)")
         }
         
         // Encode frame; PTS from camera presentationTime
@@ -906,7 +906,10 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         let outputCallback: VTCompressionOutputCallback = { outputCallbackRefCon, _, status, _, sampleBuffer in
             guard status == noErr, let sampleBuffer = sampleBuffer else { return }
             let streamManager = Unmanaged<H264TCPStreamManager>.fromOpaque(outputCallbackRefCon!).takeUnretainedValue()
-            streamManager.handleEncodedSample(sampleBuffer)
+            // Hop to main actor; H264TCPStreamManager is @MainActor
+            Task { @MainActor in
+                streamManager.handleEncodedSample(sampleBuffer)
+            }
         }
         
         let status = VTCompressionSessionCreate(
@@ -1062,8 +1065,10 @@ extension H264TCPStreamManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        // Encode immediately on the capture queue to preserve PTS and reduce latency
-        self.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
+        // Hop back to main actor; the manager is @MainActor-isolated
+        Task { @MainActor [weak self] in
+            self?.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
+        }
     }
     
     nonisolated func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
