@@ -702,9 +702,9 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         guard tcpSocket?.isConnected == true else { return }
         
         // Convert pixel buffer to JPEG
-        guard let cgImage = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil)?.takeRetainedValue() else {
-            return
-        }
+        var cgImage: CGImage?
+        let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
+        guard status == noErr, let cgImage else { return }
         let uiImage = UIImage(cgImage: cgImage)
         guard let jpegData = uiImage.jpegData(compressionQuality: jpegQuality) else {
             return
@@ -803,7 +803,6 @@ class H264TCPStreamManager: NSObject, ObservableObject {
                 connectionStatus = .error("TCP connection failed")
                 isStreaming = false
             }
-            teardownEncoder()
             captureSession?.stopRunning()
             captureSession = nil
             return
