@@ -944,15 +944,26 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
         
-        // PTS in 90kHz using a shared absolute clock (monotonic host time), wrapped to 33 bits
-        let nowHost = CMClockGetTime(CMClockGetHostTimeClock()) // same clock across cameras
-        let pts90k = CMTimeConvertScale(nowHost, timescale: 90_000, method: .default)
-        let wrap33: Int64 = 1 << 33  // MPEG PTS is 33 bits
-        let host90k = Int64(pts90k.value)
-        let ptsWrapped = UInt64((host90k % wrap33 + wrap33) % wrap33)
+        let nowAbsolute = CFAbsoluteTimeGetCurrent()  // ~750–800 million seconds in 2025+
+
+        // Convert from seconds (CFAbsoluteTime) → 90kHz ticks
+        // This is the key: do the modulo FIRST, before rounding, to avoid overflow issues
+        let pts90kRaw = nowAbsolute * 90_000.0
+        let moduloBase = Double(1 as UInt64) * Double(1 << 33)
+        var pts90kDouble = pts90kRaw.truncatingRemainder(dividingBy: moduloBase)
+
+        // Handle negative remainder (defensive)
+        if pts90kDouble < 0 {
+            pts90kDouble += moduloBase
+        }
+
+        let ptsWrapped = UInt64(pts90kDouble.rounded()) // Final 33-bit PTS in 90kHz ticks
+
+        // ——— Debug print: now correct! Shows real wall-clock time in ms ———
+        let wallClockMs = nowAbsolute * 1000.0  // Actual time since 2001-01-01
+
         if framesSent < 3 {
-            let ptsMs = Double(nowHost.value) / Double(nowHost.timescale) * 1000.0
-            print("[H264TCP] host PTS ms=\(String(format: \"%.3f\", ptsMs)) wrap90k=\(ptsWrapped)")
+            print("[H264TCP] wall clock ms=\(String(format: "%.3f", wallClockMs)) | PTS90k=\(ptsWrapped) (33-bit wrapped)")
         }
         
         let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
