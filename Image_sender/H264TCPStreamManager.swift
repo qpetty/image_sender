@@ -489,6 +489,7 @@ class H264TCPStreamManager: NSObject, ObservableObject {
     
     // MARK: - JPEG Streaming
     private let jpegQuality: CGFloat = 0.9
+    private let targetSize = CGSize(width: 960, height: 512) // DepthSplat target
     
     // MARK: - TCP Socket
     private var tcpSocket: TCPSocket?
@@ -706,7 +707,14 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
         guard status == noErr, let cgImage else { return }
         let uiImage = UIImage(cgImage: cgImage)
-        guard let jpegData = uiImage.jpegData(compressionQuality: jpegQuality) else {
+        
+        // Resize to DepthSplat target resolution (960x512) to avoid server-side scaling
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        let resizedImage = renderer.image { _ in
+            uiImage.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        
+        guard let jpegData = resizedImage.jpegData(compressionQuality: jpegQuality) else {
             return
         }
         
