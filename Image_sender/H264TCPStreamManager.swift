@@ -54,7 +54,7 @@ class TSMuxer {
     /// Mux H.264 Annex B data into MPEG-TS packets
     /// - Parameters:
     ///   - annexBData: H.264 data in Annex B format (with start codes)
-    ///   - pts: Presentation timestamp in 90kHz units
+    ///   - pts: Presentation timestamp in 90kHz units (33-bit)
     ///   - isKeyframe: Whether this is a keyframe (for random access indicator)
     /// - Returns: MPEG-TS data containing TS packets
     func mux(annexBData: Data, pts: UInt64, isKeyframe: Bool) -> Data {
@@ -69,7 +69,8 @@ class TSMuxer {
         
         // Wrap video data in PES and TS packets
         let pesData = createPESPacket(payload: annexBData, pts: pts, streamID: 0xE0)
-        let tsPackets = createTSPackets(pesData: pesData, pid: videoPID, isKeyframe: isKeyframe, pcrBase: pts)
+        // Write PCR on EVERY TS packet to give downstream a solid clock
+        let tsPackets = createTSPackets(pesData: pesData, pid: videoPID, isKeyframe: isKeyframe, pcrBase: pts, pcrEveryPacket: true)
         output.append(tsPackets)
         
         packetsSincePAT += 1
@@ -300,7 +301,7 @@ class TSMuxer {
     
     // MARK: - TS Packets
     
-    private func createTSPackets(pesData: Data, pid: UInt16, isKeyframe: Bool, pcrBase: UInt64) -> Data {
+    private func createTSPackets(pesData: Data, pid: UInt16, isKeyframe: Bool, pcrBase: UInt64, pcrEveryPacket: Bool) -> Data {
         var output = Data()
         var pesOffset = 0
         var isFirstPacket = true
@@ -322,8 +323,8 @@ class TSMuxer {
             packet[packetOffset + 1] = header2
             packetOffset += 2
             
-            // Decide if we write PCR (first packet)
-            let writePCR = isFirstPacket
+            // Decide if we write PCR
+            let writePCR = pcrEveryPacket || isFirstPacket
             
             // Compute payload size and adaptation length
             let remainingPES = pesData.count - pesOffset
@@ -944,26 +945,14 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
         
-        let nowAbsolute = CFAbsoluteTimeGetCurrent()  // ~750–800 million seconds in 2025+
-
-        // Convert from seconds (CFAbsoluteTime) → 90kHz ticks
-        // This is the key: do the modulo FIRST, before rounding, to avoid overflow issues
-        let pts90kRaw = nowAbsolute * 90_000.0
-        let moduloBase = Double(1 as UInt64) * Double(1 << 33)
-        var pts90kDouble = pts90kRaw.truncatingRemainder(dividingBy: moduloBase)
-
-        // Handle negative remainder (defensive)
-        if pts90kDouble < 0 {
-            pts90kDouble += moduloBase
-        }
-
-        let ptsWrapped = UInt64(pts90kDouble.rounded()) // Final 33-bit PTS in 90kHz ticks
-
-        // ——— Debug print: now correct! Shows real wall-clock time in ms ———
-        let wallClockMs = nowAbsolute * 1000.0  // Actual time since 2001-01-01
-
+        // PTS in 90kHz from encoder PTS, wrapped to 33 bits
+        let samplePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let pts90k = CMTimeConvertScale(samplePTS, timescale: 90_000, method: .default)
+        let wrap33: Int64 = 1 << 33  // MPEG PTS is 33 bits
+        let ptsWrapped = UInt64((Int64(pts90k.value) % wrap33 + wrap33) % wrap33)
         if framesSent < 3 {
-            print("[H264TCP] wall clock ms=\(String(format: "%.3f", wallClockMs)) | PTS90k=\(ptsWrapped) (33-bit wrapped)")
+            let ptsMs = Double(samplePTS.value) / Double(samplePTS.timescale) * 1000.0
+            print("[H264TCP] capture PTS ms=\(String(format: "%.3f", ptsMs)) | PTS90k=\(ptsWrapped)")
         }
         
         let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
