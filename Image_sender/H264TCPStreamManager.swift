@@ -466,7 +466,6 @@ enum H264TCPConnectionStatus: Equatable {
 
 /// Manages H.264 streaming over TCP in MPEG-TS container format
 /// Compatible with GStreamer: tcpserversrc ! tsdemux ! h264parse ! avdec_h264 ! autovideosink
-@MainActor
 class H264TCPStreamManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var connectionStatus: H264TCPConnectionStatus = .disconnected
@@ -906,10 +905,7 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         let outputCallback: VTCompressionOutputCallback = { outputCallbackRefCon, _, status, _, sampleBuffer in
             guard status == noErr, let sampleBuffer = sampleBuffer else { return }
             let streamManager = Unmanaged<H264TCPStreamManager>.fromOpaque(outputCallbackRefCon!).takeUnretainedValue()
-            // Hop to main actor; H264TCPStreamManager is @MainActor
-            Task { @MainActor in
-                streamManager.handleEncodedSample(sampleBuffer)
-            }
+            streamManager.handleEncodedSample(sampleBuffer)
         }
         
         let status = VTCompressionSessionCreate(
@@ -964,7 +960,7 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         socketQueue.async { [weak self] in
             guard let self, self.tcpSocket?.isConnected == true else { return }
             self.tcpSocket?.send(data: tsData)
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 self.framesSent += 1
                 self.bytesSent += Int64(tsData.count)
             }
@@ -1065,10 +1061,8 @@ extension H264TCPStreamManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        // Hop back to main actor; the manager is @MainActor-isolated
-        Task { @MainActor [weak self] in
-            self?.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
-        }
+        // Encode immediately on the capture queue (no main-thread hop)
+        self.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
     }
     
     nonisolated func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
