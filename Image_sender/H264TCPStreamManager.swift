@@ -1040,8 +1040,10 @@ extension H264TCPStreamManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        // Encode and send (called on capture queue)
-        self.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
+        // Hop back to the main actor before touching actor-isolated state
+        Task { @MainActor [weak self] in
+            self?.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
+        }
     }
     
     nonisolated func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
