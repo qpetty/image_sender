@@ -719,8 +719,9 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         guard let session = compressionSession else { return }
         
         if framesSent < 5 {
-            let ptsMs = Double(presentationTime.value) / Double(presentationTime.timescale) * 1000.0
-            print("[H264TCP] capture PTS ms=\(String(format: "%.3f", ptsMs)) timescale=\(presentationTime.timescale)")
+            let nowHost = CMClockGetTime(CMClockGetHostTimeClock())
+            let ptsMs = Double(nowHost.value) / Double(nowHost.timescale) * 1000.0
+            print("[H264TCP] host PTS ms=\(String(format: "%.3f", ptsMs)) timescale=\(nowHost.timescale)")
         }
         
         // Encode frame; PTS from camera presentationTime
@@ -943,9 +944,9 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
         
-        // PTS in 90kHz
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let pts90k = CMTimeConvertScale(pts, timescale: 90_000, method: .default)
+        // PTS in 90kHz using a shared absolute clock (monotonic host time)
+        let nowHost = CMClockGetTime(CMClockGetHostTimeClock()) // same clock across cameras
+        let pts90k = CMTimeConvertScale(nowHost, timescale: 90_000, method: .default)
         let ptsValue = UInt64(max(Int64(pts90k.value), 0))
         
         let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
