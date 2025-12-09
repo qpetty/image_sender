@@ -69,7 +69,7 @@ class TSMuxer {
         
         // Wrap video data in PES and TS packets
         let pesData = createPESPacket(payload: annexBData, pts: pts, streamID: 0xE0)
-        let tsPackets = createTSPackets(pesData: pesData, pid: videoPID, isKeyframe: isKeyframe)
+        let tsPackets = createTSPackets(pesData: pesData, pid: videoPID, isKeyframe: isKeyframe, pcrBase: pts)
         output.append(tsPackets)
         
         packetsSincePAT += 1
@@ -300,7 +300,7 @@ class TSMuxer {
     
     // MARK: - TS Packets
     
-    private func createTSPackets(pesData: Data, pid: UInt16, isKeyframe: Bool) -> Data {
+    private func createTSPackets(pesData: Data, pid: UInt16, isKeyframe: Bool, pcrBase: UInt64) -> Data {
         var output = Data()
         var pesOffset = 0
         var isFirstPacket = true
@@ -341,10 +341,12 @@ class TSMuxer {
                 payloadSize = remainingPES
             }
             
-            // For first packet of keyframe, add PCR in adaptation field
-            if isFirstPacket && isKeyframe && !needsAdaptation {
+            // Add PCR on the first TS packet to give the demuxer a clock
+            var writePCR = false
+            if isFirstPacket {
+                writePCR = true
                 needsAdaptation = true
-                adaptationLength = 8  // Minimum for PCR
+                adaptationLength = max(adaptationLength, 8)  // Minimum for PCR
                 payloadSize = tsPacketSize - 4 - adaptationLength - 1
             }
             
@@ -371,11 +373,26 @@ class TSMuxer {
                         if isFirstPacket && isKeyframe {
                             flags |= 0x40  // Random access indicator
                         }
+                        if writePCR {
+                            flags |= 0x10  // PCR flag
+                        }
                         packet[packetOffset] = flags
                         packetOffset += 1
                         
+                        if writePCR {
+                            // PCR is 27MHz clock: base * 300 + extension (we set ext=0)
+                            let pcr = pcrBase * 300
+                            packet[packetOffset] = UInt8((pcr >> 25) & 0xFF)
+                            packet[packetOffset + 1] = UInt8((pcr >> 17) & 0xFF)
+                            packet[packetOffset + 2] = UInt8((pcr >> 9) & 0xFF)
+                            packet[packetOffset + 3] = UInt8((pcr >> 1) & 0xFF)
+                            packet[packetOffset + 4] = UInt8(((pcr & 0x1) << 7) | 0x7E) // last bit + reserved + ext msb
+                            packet[packetOffset + 5] = 0x00 // ext lsb
+                            packetOffset += 6
+                        }
+                        
                         // Fill remaining adaptation field with stuffing (0xFF)
-                        for _ in 2..<adaptationLength {
+                        while (packetOffset - 1) < (4 + adaptationLength - 1) + 1 {
                             packet[packetOffset] = 0xFF
                             packetOffset += 1
                         }
@@ -707,6 +724,11 @@ class H264TCPStreamManager: NSObject, ObservableObject {
                                         height: Int32(CVPixelBufferGetHeight(pixelBuffer)))
         
         guard let session = compressionSession else { return }
+        
+        if framesSent < 5 {
+            let ptsMs = Double(presentationTime.value) / Double(presentationTime.timescale) * 1000.0
+            print("[H264TCP] capture PTS ms=\(String(format: \"%.3f\", ptsMs)) timescale=\(presentationTime.timescale)")
+        }
         
         // Encode frame; PTS from camera presentationTime
         let status = VTCompressionSessionEncodeFrame(
@@ -1040,10 +1062,8 @@ extension H264TCPStreamManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        // Hop back to the main actor before touching actor-isolated state
-        Task { @MainActor [weak self] in
-            self?.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
-        }
+        // Encode immediately on the capture queue to preserve PTS and reduce latency
+        self.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
     }
     
     nonisolated func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
