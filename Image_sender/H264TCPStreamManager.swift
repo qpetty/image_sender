@@ -379,22 +379,28 @@ class TSMuxer {
                         packet[packetOffset] = flags
                         packetOffset += 1
                         
+                        var afBytesWritten = 1 // flags byte
                         if writePCR {
                             // PCR is 27MHz clock: base * 300 + extension (we set ext=0)
                             let pcr = pcrBase * 300
-                            packet[packetOffset] = UInt8((pcr >> 25) & 0xFF)
+                            packet[packetOffset]     = UInt8((pcr >> 25) & 0xFF)
                             packet[packetOffset + 1] = UInt8((pcr >> 17) & 0xFF)
                             packet[packetOffset + 2] = UInt8((pcr >> 9) & 0xFF)
                             packet[packetOffset + 3] = UInt8((pcr >> 1) & 0xFF)
                             packet[packetOffset + 4] = UInt8(((pcr & 0x1) << 7) | 0x7E) // last bit + reserved + ext msb
                             packet[packetOffset + 5] = 0x00 // ext lsb
                             packetOffset += 6
+                            afBytesWritten += 6
                         }
                         
-                        // Fill remaining adaptation field with stuffing (0xFF)
-                        while (packetOffset - 1) < (4 + adaptationLength - 1) + 1 {
-                            packet[packetOffset] = 0xFF
-                            packetOffset += 1
+                        // Stuffing bytes to fill the adaptation field
+                        let afLenExclLength = adaptationLength - 1
+                        let stuffing = max(0, afLenExclLength - afBytesWritten)
+                        if stuffing > 0 {
+                            for _ in 0..<stuffing {
+                                packet[packetOffset] = 0xFF
+                                packetOffset += 1
+                            }
                         }
                     }
                 }
