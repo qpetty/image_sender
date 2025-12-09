@@ -944,13 +944,19 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
         
-        // PTS in 90kHz using a shared absolute clock (monotonic host time)
+        // PTS in 90kHz using a shared absolute clock (monotonic host time), wrapped to 33 bits
         let nowHost = CMClockGetTime(CMClockGetHostTimeClock()) // same clock across cameras
         let pts90k = CMTimeConvertScale(nowHost, timescale: 90_000, method: .default)
-        let ptsValue = UInt64(max(Int64(pts90k.value), 0))
+        let wrap33: Int64 = 1 << 33  // MPEG PTS is 33 bits
+        let host90k = Int64(pts90k.value)
+        let ptsWrapped = UInt64((host90k % wrap33 + wrap33) % wrap33)
+        if framesSent < 3 {
+            let ptsMs = Double(nowHost.value) / Double(nowHost.timescale) * 1000.0
+            print("[H264TCP] host PTS ms=\(String(format: \"%.3f\", ptsMs)) wrap90k=\(ptsWrapped)")
+        }
         
         let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
-        let tsData = tsMuxer.mux(annexBData: annexB, pts: ptsValue, isKeyframe: isKeyframe)
+        let tsData = tsMuxer.mux(annexBData: annexB, pts: ptsWrapped, isKeyframe: isKeyframe)
         
         socketQueue.async { [weak self] in
             guard let self, self.tcpSocket?.isConnected == true else { return }
