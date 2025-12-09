@@ -316,92 +316,80 @@ class TSMuxer {
             // Transport header
             var header1: UInt8 = 0
             var header2: UInt8 = UInt8(pid & 0xFF)
-            
-            if isFirstPacket {
-                header1 |= 0x40  // PUSI (Payload Unit Start Indicator)
-            }
+            if isFirstPacket { header1 |= 0x40 } // PUSI
             header1 |= UInt8((pid >> 8) & 0x1F)
-            
             packet[packetOffset] = header1
             packet[packetOffset + 1] = header2
             packetOffset += 2
             
-            // Calculate how much payload we can fit
+            // Decide if we write PCR (first packet)
+            let writePCR = isFirstPacket
+            
+            // Compute payload size and adaptation length
             let remainingPES = pesData.count - pesOffset
-            var payloadSize = tsPacketSize - 4  // 184 bytes max
+            let headerBytes = 4
+            // If adaptation present: 1 byte length + adaptation_length bytes
+            // We will always include adaptation when PCR is written, or when stuffing is needed.
+            let maxPayloadWithoutAdaptation = tsPacketSize - headerBytes // 184
+            let maxPayloadWithPCR = tsPacketSize - headerBytes - 1 - 7   // length byte + 7 (flags+PCR)
             
-            // Check if we need adaptation field for stuffing
-            var needsAdaptation = false
-            var adaptationLength = 0
+            var payloadSize: Int
+            var adaptationLength: Int = 0 // excludes length byte
             
-            if remainingPES < payloadSize {
-                // Need stuffing - use adaptation field
-                needsAdaptation = true
-                adaptationLength = payloadSize - remainingPES
-                payloadSize = remainingPES
+            if writePCR {
+                payloadSize = min(remainingPES, maxPayloadWithPCR)
+                let used = headerBytes + 1 + 7 + payloadSize
+                adaptationLength = 7 + max(0, tsPacketSize - used)
+            } else {
+                payloadSize = min(remainingPES, maxPayloadWithoutAdaptation)
+                let needStuff = tsPacketSize - headerBytes - payloadSize
+                if needStuff > 0 {
+                    // needStuff includes length byte; adaptationLength excludes it
+                    adaptationLength = needStuff - 1
+                }
             }
             
-            // Add PCR on the first TS packet to give the demuxer a clock
-            var writePCR = false
-            if isFirstPacket {
-                writePCR = true
-                needsAdaptation = true
-                adaptationLength = max(adaptationLength, 8)  // Minimum for PCR
-                payloadSize = tsPacketSize - 4 - adaptationLength - 1
-            }
+            let hasAdaptation = adaptationLength > 0
             
-            // Adaptation field control + continuity counter
-            var afControl: UInt8 = 0x10  // Payload only
-            if needsAdaptation {
-                afControl = 0x30  // Adaptation + payload
-            }
+            // Adaptation/control + continuity counter
+            var afControl: UInt8 = hasAdaptation ? 0x30 : 0x10 // both or payload only
             afControl |= (videoContinuityCounter & 0x0F)
             videoContinuityCounter = (videoContinuityCounter + 1) & 0x0F
-            
             packet[packetOffset] = afControl
             packetOffset += 1
             
-            // Adaptation field if needed
-            if needsAdaptation {
-                if adaptationLength > 0 {
-                    packet[packetOffset] = UInt8(adaptationLength - 1)  // AF length (excluding length byte)
-                    packetOffset += 1
-                    
-                    if adaptationLength > 1 {
-                        // Adaptation flags: discontinuity, random access, priority, PCR, etc.
-                        var flags: UInt8 = 0
-                        if isFirstPacket && isKeyframe {
-                            flags |= 0x40  // Random access indicator
-                        }
-                        if writePCR {
-                            flags |= 0x10  // PCR flag
-                        }
-                        packet[packetOffset] = flags
+            // Adaptation field
+            if hasAdaptation {
+                // Length excludes this length byte
+                packet[packetOffset] = UInt8(adaptationLength & 0xFF)
+                packetOffset += 1
+                
+                var afBytesWritten = 0
+                var flags: UInt8 = 0
+                if isFirstPacket && isKeyframe { flags |= 0x40 } // random access
+                if writePCR { flags |= 0x10 }
+                packet[packetOffset] = flags
+                packetOffset += 1
+                afBytesWritten += 1
+                
+                if writePCR {
+                    let pcr = pcrBase * 300 // 27MHz
+                    packet[packetOffset]     = UInt8((pcr >> 25) & 0xFF)
+                    packet[packetOffset + 1] = UInt8((pcr >> 17) & 0xFF)
+                    packet[packetOffset + 2] = UInt8((pcr >> 9) & 0xFF)
+                    packet[packetOffset + 3] = UInt8((pcr >> 1) & 0xFF)
+                    packet[packetOffset + 4] = UInt8(((pcr & 0x1) << 7) | 0x7E)
+                    packet[packetOffset + 5] = 0x00
+                    packetOffset += 6
+                    afBytesWritten += 6
+                }
+                
+                // Stuffing
+                let stuffing = adaptationLength - afBytesWritten
+                if stuffing > 0 {
+                    for _ in 0..<stuffing {
+                        packet[packetOffset] = 0xFF
                         packetOffset += 1
-                        
-                        var afBytesWritten = 1 // flags byte
-                        if writePCR {
-                            // PCR is 27MHz clock: base * 300 + extension (we set ext=0)
-                            let pcr = pcrBase * 300
-                            packet[packetOffset]     = UInt8((pcr >> 25) & 0xFF)
-                            packet[packetOffset + 1] = UInt8((pcr >> 17) & 0xFF)
-                            packet[packetOffset + 2] = UInt8((pcr >> 9) & 0xFF)
-                            packet[packetOffset + 3] = UInt8((pcr >> 1) & 0xFF)
-                            packet[packetOffset + 4] = UInt8(((pcr & 0x1) << 7) | 0x7E) // last bit + reserved + ext msb
-                            packet[packetOffset + 5] = 0x00 // ext lsb
-                            packetOffset += 6
-                            afBytesWritten += 6
-                        }
-                        
-                        // Stuffing bytes to fill the adaptation field
-                        let afLenExclLength = adaptationLength - 1
-                        let stuffing = max(0, afLenExclLength - afBytesWritten)
-                        if stuffing > 0 {
-                            for _ in 0..<stuffing {
-                                packet[packetOffset] = 0xFF
-                                packetOffset += 1
-                            }
-                        }
                     }
                 }
             }
@@ -413,7 +401,7 @@ class TSMuxer {
                 packetOffset += 1
             }
             
-            // Fill any remaining bytes (shouldn't happen with proper calculation)
+            // Stuff any remaining (should be none)
             while packetOffset < tsPacketSize {
                 packet[packetOffset] = 0xFF
                 packetOffset += 1
