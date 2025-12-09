@@ -459,6 +459,10 @@ class H264TCPStreamManager: NSObject, ObservableObject {
     @Published var framesSent: Int = 0
     @Published var bytesSent: Int64 = 0
     
+    // MARK: - Video Encoding (H.264 in MPEG-TS)
+    private var compressionSession: VTCompressionSession?
+    private let tsMuxer = TSMuxer()
+    
     // MARK: - Server Configuration (Published for UI binding)
     @Published var serverHost: String {
         didSet {
@@ -486,10 +490,6 @@ class H264TCPStreamManager: NSObject, ObservableObject {
     private var videoOutput: AVCaptureVideoDataOutput?
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private let captureQueue = DispatchQueue(label: "com.imagesender.h264tcp.capture", qos: .userInteractive)
-    
-    // MARK: - JPEG Streaming
-    private let jpegQuality: CGFloat = 0.9
-    private let targetSize = CGSize(width: 960, height: 512) // DepthSplat target
     
     // MARK: - TCP Socket
     private var tcpSocket: TCPSocket?
@@ -698,40 +698,29 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Frame Encoding and Sending (JPEG multipart)
+    // MARK: - Frame Encoding and Sending (H.264 in MPEG-TS with PTS)
     private func encodeAndSendFrame(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
         guard tcpSocket?.isConnected == true else { return }
         
-        // Convert pixel buffer to JPEG
-        var cgImage: CGImage?
-        let status = VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &cgImage)
-        guard status == noErr, let cgImage else { return }
-        let uiImage = UIImage(cgImage: cgImage)
+        // Lazily create the compression session matching the capture buffer size
+        setupCompressionSessionIfNeeded(width: Int32(CVPixelBufferGetWidth(pixelBuffer)),
+                                        height: Int32(CVPixelBufferGetHeight(pixelBuffer)))
         
-        // Resize to DepthSplat target resolution (960x512) to avoid server-side scaling
-        let renderer = UIGraphicsImageRenderer(size: targetSize)
-        let resizedImage = renderer.image { _ in
-            uiImage.draw(in: CGRect(origin: .zero, size: targetSize))
-        }
+        guard let session = compressionSession else { return }
         
-        guard let jpegData = resizedImage.jpegData(compressionQuality: jpegQuality) else {
-            return
-        }
+        // Encode frame; PTS from camera presentationTime
+        let status = VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pixelBuffer,
+            presentationTimeStamp: presentationTime,
+            duration: .invalid,
+            frameProperties: nil,
+            sourceFrameRefcon: nil,
+            infoFlagsOut: nil
+        )
         
-        // Build multipart/x-mixed-replace frame with boundary "frame"
-        var packet = Data()
-        if let header = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: \(jpegData.count)\r\n\r\n".data(using: .utf8) {
-            packet.append(header)
-        }
-        packet.append(jpegData)
-        packet.append(Data("\r\n".utf8))
-        
-        socketQueue.async { [weak self] in
-            self?.tcpSocket?.send(data: packet)
-            Task { @MainActor in
-                self?.framesSent += 1
-                self?.bytesSent += Int64(packet.count)
-            }
+        if status != noErr {
+            print("[H264TCP] Encode error: \(status)")
         }
     }
     
@@ -842,16 +831,22 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         await MainActor.run {
             connectionStatus = .streaming
-            statusMessage = "Streaming (MJPEG)"
+            statusMessage = "Streaming (H.264 TS)"
         }
         
-        print("[MJPEG] === Stream is LIVE ===")
+        print("[H264TCP] === Stream is LIVE (MPEG-TS with PTS) ===")
     }
     
     func stopStreaming() {
         guard isStreaming else { return }
         
         print("[H264TCP] Stopping stream")
+        
+        // Tear down encoder
+        if let session = compressionSession {
+            VTCompressionSessionInvalidate(session)
+            compressionSession = nil
+        }
         
         // Re-enable screen lock
         preventScreenLock(false)
@@ -879,6 +874,125 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         statusMessage = "Stopped"
         
         print("[H264TCP] Stream stopped and cleaned up")
+    }
+    
+    // MARK: - H.264 Compression Session and TS Output
+    private func setupCompressionSessionIfNeeded(width: Int32, height: Int32) {
+        if compressionSession != nil { return }
+        
+        var session: VTCompressionSession?
+        let outputCallback: VTCompressionOutputCallback = { outputCallbackRefCon, _, status, _, sampleBuffer in
+            guard status == noErr, let sampleBuffer = sampleBuffer else { return }
+            let streamManager = Unmanaged<H264TCPStreamManager>.fromOpaque(outputCallbackRefCon!).takeUnretainedValue()
+            streamManager.handleEncodedSample(sampleBuffer)
+        }
+        
+        let status = VTCompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            width: width,
+            height: height,
+            codecType: kCMVideoCodecType_H264,
+            encoderSpecification: nil,
+            imageBufferAttributes: nil,
+            compressedDataAllocator: nil,
+            outputCallback: outputCallback,
+            refcon: Unmanaged.passUnretained(self).toOpaque(),
+            compressionSessionOut: &session
+        )
+        
+        guard status == noErr, let session else {
+            print("[H264TCP] Failed to create compression session: \(status)")
+            return
+        }
+        
+        // Configure low-latency, reasonable quality
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_4_0)
+        let bitrate: Int32 = Int32(videoBitrate * 1000) // kbps -> bps
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrate as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 30 as CFTypeRef)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: keyframeInterval as CFTypeRef)
+        let keyframeSeconds = Double(keyframeInterval) / 30.0
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: keyframeSeconds as CFTypeRef)
+        
+        // Prepare session
+        VTCompressionSessionPrepareToEncodeFrames(session)
+        tsMuxer.reset()
+        compressionSession = session
+        print("[H264TCP] Compression session ready (\(width)x\(height))")
+    }
+    
+    private func handleEncodedSample(_ sampleBuffer: CMSampleBuffer) {
+        guard let socket = tcpSocket, socket.isConnected else { return }
+        
+        guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
+        
+        // PTS in 90kHz
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let pts90k = CMTimeConvertScale(pts, timescale: 90_000, method: .default)
+        let ptsValue = UInt64(max(Int64(pts90k.value), 0))
+        
+        let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
+        let tsData = tsMuxer.mux(annexBData: annexB, pts: ptsValue, isKeyframe: isKeyframe)
+        
+        socketQueue.async { [weak self] in
+            guard let self, self.tcpSocket?.isConnected == true else { return }
+            self.tcpSocket?.send(data: tsData)
+            Task { @MainActor in
+                self.framesSent += 1
+                self.bytesSent += Int64(tsData.count)
+            }
+        }
+    }
+    
+    private func makeAnnexB(from sampleBuffer: CMSampleBuffer) -> Data? {
+        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return nil
+        }
+        
+        var annexB = Data()
+        
+        let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
+        if isKeyframe {
+            // Prepend SPS/PPS
+            var spsPointer: UnsafePointer<UInt8>?
+            var spsSize: Int = 0
+            var ppsPointer: UnsafePointer<UInt8>?
+            var ppsSize: Int = 0
+            var parameterSetCount: Int = 0
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(formatDesc, parameterSetIndex: 0, parameterSetPointerOut: &spsPointer, parameterSetSizeOut: &spsSize, parameterSetCountOut: &parameterSetCount, nalUnitHeaderLengthOut: nil) == noErr,
+               let spsPointer, spsSize > 0 {
+                annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                annexB.append(Data(bytes: spsPointer, count: spsSize))
+            }
+            if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(formatDesc, parameterSetIndex: 1, parameterSetPointerOut: &ppsPointer, parameterSetSizeOut: &ppsSize, parameterSetCountOut: &parameterSetCount, nalUnitHeaderLengthOut: nil) == noErr,
+               let ppsPointer, ppsSize > 0 {
+                annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+                annexB.append(Data(bytes: ppsPointer, count: ppsSize))
+            }
+        }
+        
+        var lengthAtOffset: size_t = 0
+        var totalLength: size_t = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(dataBuffer, atOffset: 0, lengthAtOffsetOut: &lengthAtOffset, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+        guard status == noErr, let dataPointer else { return nil }
+        
+        var bufferOffset: size_t = 0
+        let avccHeaderLength = 4
+        while bufferOffset + avccHeaderLength < totalLength {
+            var naluLength: UInt32 = 0
+            memcpy(&naluLength, dataPointer.advanced(by: Int(bufferOffset)), avccHeaderLength)
+            naluLength = CFSwapInt32BigToHost(naluLength)
+            let naluStart = dataPointer.advanced(by: Int(bufferOffset + size_t(avccHeaderLength)))
+            annexB.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+            annexB.append(Data(bytes: naluStart, count: Int(naluLength)))
+            bufferOffset += size_t(avccHeaderLength) + size_t(naluLength)
+        }
+        
+        return annexB
     }
     
     // MARK: - Preview Management
@@ -926,10 +1040,8 @@ extension H264TCPStreamManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
-        // Encode and send (this is called on capture queue)
-        Task { @MainActor in
-            self.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
-        }
+        // Encode and send (called on capture queue)
+        self.encodeAndSendFrame(pixelBuffer, presentationTime: presentationTime)
     }
     
     nonisolated func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
