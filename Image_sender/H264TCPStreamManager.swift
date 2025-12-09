@@ -690,11 +690,6 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         if connected {
             self.tcpSocket = socket
             print("[H264TCP] TCP connected successfully")
-            // Send multipart preamble so multipartdemux can find the boundary
-            let preamble = "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n"
-            if let data = preamble.data(using: .utf8) {
-                socket.send(data: data)
-            }
             return true
         } else {
             print("[H264TCP] TCP connection failed")
