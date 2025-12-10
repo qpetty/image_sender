@@ -504,13 +504,17 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         guard isPipelineRunning else { return }
         guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
         
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
+        
+        // Use an absolute wall-clock timestamp (Unix epoch) so receivers on
+        // different devices have comparable time bases.
+        let epochSeconds = Date().timeIntervalSince1970
+        let presentationTime = CMTimeMakeWithSeconds(epochSeconds, preferredTimescale: 1_000_000_000)
+        
         if framesSent < 3 {
             let ptsMs = Double(presentationTime.value) / Double(presentationTime.timescale) * 1000.0
-            print("[H264TCP] capture PTS ms=\(String(format: "%.3f", ptsMs))")
+            print("[H264TCP] absolute PTS ms=\(String(format: "%.3f", ptsMs))")
         }
-        
-        let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
         
         GStreamerBridge.shared().pushH264Data(annexB, isKeyframe: isKeyframe, presentationTime: presentationTime)
         
