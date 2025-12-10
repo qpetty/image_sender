@@ -2,8 +2,8 @@
 //  H264TCPStreamManager.swift
 //  Image_sender
 //
-//  Manages H.264 video streaming over TCP in MPEG-TS container format
-//  for GStreamer tcpserversrc compatibility
+//  Manages H.264 video streaming over TCP using a GStreamer pipeline
+//  (appsrc -> h264parse -> mpegtsmux -> tcpclientsink)
 //
 
 import Foundation
@@ -11,430 +11,6 @@ import Combine
 import AVFoundation
 import VideoToolbox
 import UIKit
-
-// MARK: - MPEG-TS Muxer
-
-/// MPEG-TS Muxer for wrapping H.264 video in Transport Stream format
-/// Provides reliable framing with sync bytes (0x47) for GStreamer compatibility
-class TSMuxer {
-    // TS packet size is always 188 bytes
-    private let tsPacketSize = 188
-    
-    // PIDs (Packet Identifiers)
-    private let patPID: UInt16 = 0x0000      // Program Association Table
-    private let pmtPID: UInt16 = 0x1000      // Program Map Table
-    private let videoPID: UInt16 = 0x0100    // Video stream
-    
-    // Continuity counters (0-15, wrap around)
-    private var patContinuityCounter: UInt8 = 0
-    private var pmtContinuityCounter: UInt8 = 0
-    private var videoContinuityCounter: UInt8 = 0
-    
-    // PAT/PMT interval counter
-    private var packetsSincePAT: Int = 0
-    private let patInterval = 30  // Send PAT/PMT every 30 video packets (~1 second at 30fps)
-    
-    // Pre-built PAT and PMT
-    private var patPacket: Data!
-    private var pmtPacket: Data!
-    
-    init() {
-        buildPATPacket()
-        buildPMTPacket()
-    }
-    
-    /// Reset the muxer state (call when starting a new stream)
-    func reset() {
-        patContinuityCounter = 0
-        pmtContinuityCounter = 0
-        videoContinuityCounter = 0
-        packetsSincePAT = 0
-    }
-    
-    /// Mux H.264 Annex B data into MPEG-TS packets
-    /// - Parameters:
-    ///   - annexBData: H.264 data in Annex B format (with start codes)
-    ///   - pts: Presentation timestamp in 90kHz units (33-bit)
-    ///   - isKeyframe: Whether this is a keyframe (for random access indicator)
-    /// - Returns: MPEG-TS data containing TS packets
-    func mux(annexBData: Data, pts: UInt64, isKeyframe: Bool) -> Data {
-        var output = Data()
-        
-        // Send PAT and PMT periodically (or on keyframes)
-        if packetsSincePAT >= patInterval || isKeyframe {
-            output.append(generatePATPacket())
-            output.append(generatePMTPacket())
-            packetsSincePAT = 0
-        }
-        
-        // Wrap video data in PES and TS packets
-        let pesData = createPESPacket(payload: annexBData, pts: pts, streamID: 0xE0)
-        // Write PCR on EVERY TS packet to give downstream a solid clock
-        let tsPackets = createTSPackets(pesData: pesData, pid: videoPID, isKeyframe: isKeyframe, pcrBase: pts, pcrEveryPacket: true)
-        output.append(tsPackets)
-        
-        packetsSincePAT += 1
-        
-        return output
-    }
-    
-    // MARK: - PAT (Program Association Table)
-    
-    private func buildPATPacket() {
-        // PAT tells decoder where to find PMT
-        // Program 1 -> PMT at PID 0x1000
-        var packet = Data(count: tsPacketSize)
-        
-        // Sync byte
-        packet[0] = 0x47
-        
-        // Header: PUSI=1, PID=0x0000
-        packet[1] = 0x40  // Transport error=0, PUSI=1, Priority=0
-        packet[2] = 0x00  // PID high bits = 0
-        
-        // Adaptation + CC (will be updated when sent)
-        packet[3] = 0x10  // No adaptation field, payload only
-        
-        // Pointer field (since PUSI=1)
-        packet[4] = 0x00
-        
-        // PAT section
-        var offset = 5
-        
-        // Table ID (0x00 for PAT)
-        packet[offset] = 0x00
-        offset += 1
-        
-        // Section syntax + section length (13 bytes: 5 header + 4 program + 4 CRC)
-        packet[offset] = 0xB0      // Section syntax indicator=1, private=0, reserved=11
-        packet[offset + 1] = 0x0D  // Section length = 13
-        offset += 2
-        
-        // Transport stream ID
-        packet[offset] = 0x00
-        packet[offset + 1] = 0x01  // TS ID = 1
-        offset += 2
-        
-        // Version number, current/next
-        packet[offset] = 0xC1  // Reserved=11, version=0, current=1
-        offset += 1
-        
-        // Section number
-        packet[offset] = 0x00
-        offset += 1
-        
-        // Last section number
-        packet[offset] = 0x00
-        offset += 1
-        
-        // Program 1
-        packet[offset] = 0x00
-        packet[offset + 1] = 0x01  // Program number = 1
-        offset += 2
-        
-        // PMT PID (0x1000)
-        packet[offset] = 0xF0 | UInt8((pmtPID >> 8) & 0x1F)  // Reserved=111, PID high
-        packet[offset + 1] = UInt8(pmtPID & 0xFF)
-        offset += 2
-        
-        // Calculate CRC32
-        let crcData = packet[5..<offset]
-        let crc = calculateCRC32(data: crcData)
-        packet[offset] = UInt8((crc >> 24) & 0xFF)
-        packet[offset + 1] = UInt8((crc >> 16) & 0xFF)
-        packet[offset + 2] = UInt8((crc >> 8) & 0xFF)
-        packet[offset + 3] = UInt8(crc & 0xFF)
-        offset += 4
-        
-        // Fill rest with 0xFF (stuffing)
-        for i in offset..<tsPacketSize {
-            packet[i] = 0xFF
-        }
-        
-        patPacket = packet
-    }
-    
-    private func generatePATPacket() -> Data {
-        var packet = patPacket!
-        // Update continuity counter
-        packet[3] = 0x10 | (patContinuityCounter & 0x0F)
-        patContinuityCounter = (patContinuityCounter + 1) & 0x0F
-        return packet
-    }
-    
-    // MARK: - PMT (Program Map Table)
-    
-    private func buildPMTPacket() {
-        // PMT describes the program's streams
-        var packet = Data(count: tsPacketSize)
-        
-        // Sync byte
-        packet[0] = 0x47
-        
-        // Header: PUSI=1, PID=0x1000
-        packet[1] = 0x40 | UInt8((pmtPID >> 8) & 0x1F)
-        packet[2] = UInt8(pmtPID & 0xFF)
-        
-        // Adaptation + CC
-        packet[3] = 0x10
-        
-        // Pointer field
-        packet[4] = 0x00
-        
-        var offset = 5
-        
-        // Table ID (0x02 for PMT)
-        packet[offset] = 0x02
-        offset += 1
-        
-        // Section syntax + section length (18 bytes)
-        packet[offset] = 0xB0
-        packet[offset + 1] = 0x12  // Section length = 18
-        offset += 2
-        
-        // Program number
-        packet[offset] = 0x00
-        packet[offset + 1] = 0x01  // Program 1
-        offset += 2
-        
-        // Version, current/next
-        packet[offset] = 0xC1
-        offset += 1
-        
-        // Section number
-        packet[offset] = 0x00
-        offset += 1
-        
-        // Last section number
-        packet[offset] = 0x00
-        offset += 1
-        
-        // PCR PID (use video PID)
-        packet[offset] = 0xE0 | UInt8((videoPID >> 8) & 0x1F)
-        packet[offset + 1] = UInt8(videoPID & 0xFF)
-        offset += 2
-        
-        // Program info length (0)
-        packet[offset] = 0xF0
-        packet[offset + 1] = 0x00
-        offset += 2
-        
-        // Stream: H.264 video
-        packet[offset] = 0x1B  // Stream type = H.264
-        offset += 1
-        
-        // Elementary PID
-        packet[offset] = 0xE0 | UInt8((videoPID >> 8) & 0x1F)
-        packet[offset + 1] = UInt8(videoPID & 0xFF)
-        offset += 2
-        
-        // ES info length (0)
-        packet[offset] = 0xF0
-        packet[offset + 1] = 0x00
-        offset += 2
-        
-        // CRC32
-        let crcData = packet[5..<offset]
-        let crc = calculateCRC32(data: crcData)
-        packet[offset] = UInt8((crc >> 24) & 0xFF)
-        packet[offset + 1] = UInt8((crc >> 16) & 0xFF)
-        packet[offset + 2] = UInt8((crc >> 8) & 0xFF)
-        packet[offset + 3] = UInt8(crc & 0xFF)
-        offset += 4
-        
-        // Stuffing
-        for i in offset..<tsPacketSize {
-            packet[i] = 0xFF
-        }
-        
-        pmtPacket = packet
-    }
-    
-    private func generatePMTPacket() -> Data {
-        var packet = pmtPacket!
-        packet[3] = 0x10 | (pmtContinuityCounter & 0x0F)
-        pmtContinuityCounter = (pmtContinuityCounter + 1) & 0x0F
-        return packet
-    }
-    
-    // MARK: - PES (Packetized Elementary Stream)
-    
-    private func createPESPacket(payload: Data, pts: UInt64, streamID: UInt8) -> Data {
-        var pes = Data()
-        
-        // PES start code (0x000001)
-        pes.append(contentsOf: [0x00, 0x00, 0x01])
-        
-        // Stream ID (0xE0 = video)
-        pes.append(streamID)
-        
-        // PES packet length (0 = unbounded for video)
-        pes.append(contentsOf: [0x00, 0x00])
-        
-        // Optional PES header
-        // Marker bits + scrambling + priority + alignment + copyright + original
-        pes.append(0x80)  // '10' marker, no scrambling, etc.
-        
-        // PTS/DTS flags + other flags
-        pes.append(0x80)  // PTS only, no DTS
-        
-        // PES header data length (5 bytes for PTS)
-        pes.append(0x05)
-        
-        // PTS (5 bytes)
-        // Format: 0010 PTS[32..30] 1 PTS[29..15] 1 PTS[14..0] 1
-        let pts32_30 = UInt8((pts >> 30) & 0x07)
-        let pts29_15 = UInt16((pts >> 15) & 0x7FFF)
-        let pts14_0 = UInt16(pts & 0x7FFF)
-        
-        pes.append(0x21 | (pts32_30 << 1))  // 0010 xxx1
-        pes.append(UInt8((pts29_15 >> 7) & 0xFF))
-        pes.append(UInt8(((pts29_15 & 0x7F) << 1) | 0x01))
-        pes.append(UInt8((pts14_0 >> 7) & 0xFF))
-        pes.append(UInt8(((pts14_0 & 0x7F) << 1) | 0x01))
-        
-        // Payload (H.264 Annex B data)
-        pes.append(payload)
-        
-        return pes
-    }
-    
-    // MARK: - TS Packets
-    
-    private func createTSPackets(pesData: Data, pid: UInt16, isKeyframe: Bool, pcrBase: UInt64, pcrEveryPacket: Bool) -> Data {
-        var output = Data()
-        var pesOffset = 0
-        var isFirstPacket = true
-        
-        while pesOffset < pesData.count {
-            var packet = Data(count: tsPacketSize)
-            var packetOffset = 0
-            
-            // Sync byte
-            packet[packetOffset] = 0x47
-            packetOffset += 1
-            
-            // Transport header
-            var header1: UInt8 = 0
-            var header2: UInt8 = UInt8(pid & 0xFF)
-            if isFirstPacket { header1 |= 0x40 } // PUSI
-            header1 |= UInt8((pid >> 8) & 0x1F)
-            packet[packetOffset] = header1
-            packet[packetOffset + 1] = header2
-            packetOffset += 2
-            
-            // Decide if we write PCR
-            let writePCR = pcrEveryPacket || isFirstPacket
-            
-            // Compute payload size and adaptation length
-            let remainingPES = pesData.count - pesOffset
-            let headerBytes = 4
-            // If adaptation present: 1 byte length + adaptation_length bytes
-            // We will always include adaptation when PCR is written, or when stuffing is needed.
-            let maxPayloadWithoutAdaptation = tsPacketSize - headerBytes // 184
-            let maxPayloadWithPCR = tsPacketSize - headerBytes - 1 - 7   // length byte + 7 (flags+PCR)
-            
-            var payloadSize: Int
-            var adaptationLength: Int = 0 // excludes length byte
-            
-            if writePCR {
-                payloadSize = min(remainingPES, maxPayloadWithPCR)
-                let used = headerBytes + 1 + 7 + payloadSize
-                adaptationLength = 7 + max(0, tsPacketSize - used)
-            } else {
-                payloadSize = min(remainingPES, maxPayloadWithoutAdaptation)
-                let needStuff = tsPacketSize - headerBytes - payloadSize
-                if needStuff > 0 {
-                    // needStuff includes length byte; adaptationLength excludes it
-                    adaptationLength = needStuff - 1
-                }
-            }
-            
-            let hasAdaptation = adaptationLength > 0
-            
-            // Adaptation/control + continuity counter
-            var afControl: UInt8 = hasAdaptation ? 0x30 : 0x10 // both or payload only
-            afControl |= (videoContinuityCounter & 0x0F)
-            videoContinuityCounter = (videoContinuityCounter + 1) & 0x0F
-            packet[packetOffset] = afControl
-            packetOffset += 1
-            
-            // Adaptation field
-            if hasAdaptation {
-                // Length excludes this length byte
-                packet[packetOffset] = UInt8(adaptationLength & 0xFF)
-                packetOffset += 1
-                
-                var afBytesWritten = 0
-                var flags: UInt8 = 0
-                if isFirstPacket && isKeyframe { flags |= 0x40 } // random access
-                if writePCR { flags |= 0x10 }
-                packet[packetOffset] = flags
-                packetOffset += 1
-                afBytesWritten += 1
-                
-                if writePCR {
-                    let pcr = pcrBase * 300 // 27MHz
-                    packet[packetOffset]     = UInt8((pcr >> 25) & 0xFF)
-                    packet[packetOffset + 1] = UInt8((pcr >> 17) & 0xFF)
-                    packet[packetOffset + 2] = UInt8((pcr >> 9) & 0xFF)
-                    packet[packetOffset + 3] = UInt8((pcr >> 1) & 0xFF)
-                    packet[packetOffset + 4] = UInt8(((pcr & 0x1) << 7) | 0x7E)
-                    packet[packetOffset + 5] = 0x00
-                    packetOffset += 6
-                    afBytesWritten += 6
-                }
-                
-                // Stuffing
-                let stuffing = adaptationLength - afBytesWritten
-                if stuffing > 0 {
-                    for _ in 0..<stuffing {
-                        packet[packetOffset] = 0xFF
-                        packetOffset += 1
-                    }
-                }
-            }
-            
-            // Payload
-            let payloadData = pesData[pesOffset..<(pesOffset + payloadSize)]
-            for byte in payloadData {
-                packet[packetOffset] = byte
-                packetOffset += 1
-            }
-            
-            // Stuff any remaining (should be none)
-            while packetOffset < tsPacketSize {
-                packet[packetOffset] = 0xFF
-                packetOffset += 1
-            }
-            
-            output.append(packet)
-            pesOffset += payloadSize
-            isFirstPacket = false
-        }
-        
-        return output
-    }
-    
-    // MARK: - CRC32 (MPEG-2 variant)
-    
-    private func calculateCRC32(data: Data) -> UInt32 {
-        var crc: UInt32 = 0xFFFFFFFF
-        
-        for byte in data {
-            crc ^= UInt32(byte) << 24
-            for _ in 0..<8 {
-                if (crc & 0x80000000) != 0 {
-                    crc = (crc << 1) ^ 0x04C11DB7
-                } else {
-                    crc <<= 1
-                }
-            }
-        }
-        
-        return crc
-    }
-}
 
 /// Connection status for H264 TCP streaming
 enum H264TCPConnectionStatus: Equatable {
@@ -459,8 +35,8 @@ enum H264TCPConnectionStatus: Equatable {
     }
 }
 
-/// Manages H.264 streaming over TCP in MPEG-TS container format
-/// Compatible with GStreamer: tcpserversrc ! tsdemux ! h264parse ! avdec_h264 ! autovideosink
+/// Manages H.264 streaming over TCP via a GStreamer pipeline
+/// Pipeline: appsrc(h264) ! h264parse ! mpegtsmux ! tcpclientsink
 class H264TCPStreamManager: NSObject, ObservableObject {
     // MARK: - Published Properties
     @Published var connectionStatus: H264TCPConnectionStatus = .disconnected
@@ -470,9 +46,9 @@ class H264TCPStreamManager: NSObject, ObservableObject {
     @Published var framesSent: Int = 0
     @Published var bytesSent: Int64 = 0
     
-    // MARK: - Video Encoding (H.264 in MPEG-TS)
+    // MARK: - Video Encoding (H.264)
     private var compressionSession: VTCompressionSession?
-    private let tsMuxer = TSMuxer()
+    private var isPipelineRunning = false
     
     // MARK: - Server Configuration (Published for UI binding)
     @Published var serverHost: String {
@@ -501,10 +77,6 @@ class H264TCPStreamManager: NSObject, ObservableObject {
     private var videoOutput: AVCaptureVideoDataOutput?
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private let captureQueue = DispatchQueue(label: "com.imagesender.h264tcp.capture", qos: .userInteractive)
-    
-    // MARK: - TCP Socket
-    private var tcpSocket: TCPSocket?
-    private let socketQueue = DispatchQueue(label: "com.imagesender.h264tcp.socket", qos: .userInitiated)
     
     // MARK: - Orientation Observer
     private var orientationObserver: NSObjectProtocol?
@@ -686,32 +258,9 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         return true
     }
     
-    // MARK: - TCP Connection
-    private func connectTCP() async -> Bool {
-        print("[H264TCP] Connecting to \(serverHost):\(serverPort)...")
-        
-        guard let port = UInt16(serverPort) else {
-            print("[H264TCP] Invalid port number")
-            return false
-        }
-        
-        let socket = TCPSocket()
-        
-        let connected = await socket.connect(host: serverHost, port: port)
-        
-        if connected {
-            self.tcpSocket = socket
-            print("[H264TCP] TCP connected successfully")
-            return true
-        } else {
-            print("[H264TCP] TCP connection failed")
-            return false
-        }
-    }
-    
     // MARK: - Frame Encoding and Sending (H.264 in MPEG-TS with PTS)
     private func encodeAndSendFrame(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
-        guard tcpSocket?.isConnected == true else { return }
+        guard isPipelineRunning else { return }
         
         // Lazily create the compression session matching the capture buffer size
         setupCompressionSessionIfNeeded(width: Int32(CVPixelBufferGetWidth(pixelBuffer)),
@@ -805,16 +354,14 @@ class H264TCPStreamManager: NSObject, ObservableObject {
             height = 720
         }
         
-        // Connect TCP
         await MainActor.run {
-            statusMessage = "Connecting to server..."
+            statusMessage = "Starting GStreamer..."
         }
         
-        let tcpConnected = await connectTCP()
-        guard tcpConnected else {
+        guard let port = Int32(serverPort) else {
             await MainActor.run {
-                statusMessage = "Connection failed"
-                connectionStatus = .error("TCP connection failed")
+                statusMessage = "Invalid port"
+                connectionStatus = .error("Invalid port")
                 isStreaming = false
             }
             captureSession?.stopRunning()
@@ -822,10 +369,24 @@ class H264TCPStreamManager: NSObject, ObservableObject {
             return
         }
         
+        let pipelineStarted = GStreamerBridge.shared().startPipeline(withHost: serverHost, port: port)
+        guard pipelineStarted else {
+            await MainActor.run {
+                statusMessage = "Pipeline start failed"
+                connectionStatus = .error("GStreamer init failed")
+                isStreaming = false
+            }
+            captureSession?.stopRunning()
+            captureSession = nil
+            return
+        }
+        
+        isPipelineRunning = true
+        
         await MainActor.run {
             isConnected = true
             connectionStatus = .connected
-            statusMessage = "Connected, starting camera..."
+            statusMessage = "Pipeline ready, starting camera..."
         }
         
         // Start capture session on background thread (required by AVCaptureSession)
@@ -848,10 +409,10 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         await MainActor.run {
             connectionStatus = .streaming
-            statusMessage = "Streaming (H.264 TS)"
+            statusMessage = "Streaming (H.264 via GStreamer)"
         }
         
-        print("[H264TCP] === Stream is LIVE (MPEG-TS with PTS) ===")
+        print("[H264TCP] === Stream is LIVE (GStreamer) ===")
     }
     
     func stopStreaming() {
@@ -881,9 +442,9 @@ class H264TCPStreamManager: NSObject, ObservableObject {
             session?.stopRunning()
         }
         
-        // Disconnect TCP
-        tcpSocket?.disconnect()
-        tcpSocket = nil
+        // Stop GStreamer pipeline
+        GStreamerBridge.shared().stopPipeline()
+        isPipelineRunning = false
         
         isStreaming = false
         isConnected = false
@@ -893,7 +454,7 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         print("[H264TCP] Stream stopped and cleaned up")
     }
     
-    // MARK: - H.264 Compression Session and TS Output
+    // MARK: - H.264 Compression Session
     private func setupCompressionSessionIfNeeded(width: Int32, height: Int32) {
         if compressionSession != nil { return }
         
@@ -935,36 +496,28 @@ class H264TCPStreamManager: NSObject, ObservableObject {
         
         // Prepare session
         VTCompressionSessionPrepareToEncodeFrames(session)
-        tsMuxer.reset()
         compressionSession = session
         print("[H264TCP] Compression session ready (\(width)x\(height))")
     }
     
     private func handleEncodedSample(_ sampleBuffer: CMSampleBuffer) {
-        guard let socket = tcpSocket, socket.isConnected else { return }
-        
+        guard isPipelineRunning else { return }
         guard let annexB = makeAnnexB(from: sampleBuffer) else { return }
         
-        // PTS in 90kHz from encoder PTS, wrapped to 33 bits
-        let samplePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let pts90k = CMTimeConvertScale(samplePTS, timescale: 90_000, method: .default)
-        let wrap33: Int64 = 1 << 33  // MPEG PTS is 33 bits
-        let ptsWrapped = UInt64((Int64(pts90k.value) % wrap33 + wrap33) % wrap33)
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         if framesSent < 3 {
-            let ptsMs = Double(samplePTS.value) / Double(samplePTS.timescale) * 1000.0
-            print("[H264TCP] capture PTS ms=\(String(format: "%.3f", ptsMs)) | PTS90k=\(ptsWrapped)")
+            let ptsMs = Double(presentationTime.value) / Double(presentationTime.timescale) * 1000.0
+            print("[H264TCP] capture PTS ms=\(String(format: "%.3f", ptsMs))")
         }
         
         let isKeyframe = !(CMGetAttachment(sampleBuffer, key: kCMSampleAttachmentKey_NotSync, attachmentModeOut: nil) as? Bool ?? false)
-        let tsData = tsMuxer.mux(annexBData: annexB, pts: ptsWrapped, isKeyframe: isKeyframe)
         
-        socketQueue.async { [weak self] in
-            guard let self, self.tcpSocket?.isConnected == true else { return }
-            self.tcpSocket?.send(data: tsData)
-            DispatchQueue.main.async {
-                self.framesSent += 1
-                self.bytesSent += Int64(tsData.count)
-            }
+        GStreamerBridge.shared().pushH264Data(annexB, isKeyframe: isKeyframe, presentationTime: presentationTime)
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.framesSent += 1
+            self.bytesSent += Int64(annexB.count)
         }
     }
     
@@ -1068,120 +621,6 @@ extension H264TCPStreamManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     
     nonisolated func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         print("[H264TCP] Frame dropped")
-    }
-}
-
-// MARK: - TCP Socket Helper
-class TCPSocket {
-    private var inputStream: InputStream?
-    private var outputStream: OutputStream?
-    private(set) var isConnected = false
-    private let streamQueue = DispatchQueue(label: "com.imagesender.tcpsocket.stream")
-    
-    func connect(host: String, port: UInt16) async -> Bool {
-        return await withCheckedContinuation { continuation in
-            streamQueue.async { [weak self] in
-                guard let self = self else {
-                    continuation.resume(returning: false)
-                    return
-                }
-                
-                var readStream: Unmanaged<CFReadStream>?
-                var writeStream: Unmanaged<CFWriteStream>?
-                
-                CFStreamCreatePairWithSocketToHost(
-                    kCFAllocatorDefault,
-                    host as CFString,
-                    UInt32(port),
-                    &readStream,
-                    &writeStream
-                )
-                
-                guard let input = readStream?.takeRetainedValue() as InputStream?,
-                      let output = writeStream?.takeRetainedValue() as OutputStream? else {
-                    print("[TCPSocket] Failed to create streams")
-                    continuation.resume(returning: false)
-                    return
-                }
-                
-                self.inputStream = input
-                self.outputStream = output
-                
-                // Disable Nagle's algorithm for lower latency
-                input.setProperty(NSNumber(value: true), forKey: Stream.PropertyKey(rawValue: "kCFStreamPropertyTCPNoDelay"))
-                output.setProperty(NSNumber(value: true), forKey: Stream.PropertyKey(rawValue: "kCFStreamPropertyTCPNoDelay"))
-                
-                input.open()
-                output.open()
-                
-                // Wait for connection with timeout
-                var attempts = 0
-                let maxAttempts = 50 // 5 seconds
-                
-                while attempts < maxAttempts {
-                    if output.streamStatus == .open {
-                        self.isConnected = true
-                        print("[TCPSocket] Connected to \(host):\(port)")
-                        continuation.resume(returning: true)
-                        return
-                    } else if output.streamStatus == .error {
-                        print("[TCPSocket] Connection error: \(output.streamError?.localizedDescription ?? "unknown")")
-                        self.cleanup()
-                        continuation.resume(returning: false)
-                        return
-                    }
-                    
-                    Thread.sleep(forTimeInterval: 0.1)
-                    attempts += 1
-                }
-                
-                print("[TCPSocket] Connection timeout")
-                self.cleanup()
-                continuation.resume(returning: false)
-            }
-        }
-    }
-    
-    func send(data: Data) {
-        guard isConnected, let output = outputStream else { return }
-        
-        data.withUnsafeBytes { buffer in
-            guard let pointer = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            var bytesRemaining = data.count
-            var offset = 0
-            
-            while bytesRemaining > 0 {
-                let bytesWritten = output.write(pointer.advanced(by: offset), maxLength: bytesRemaining)
-                
-                if bytesWritten < 0 {
-                    // Error
-                    print("[TCPSocket] Write error: \(output.streamError?.localizedDescription ?? "unknown")")
-                    isConnected = false
-                    break
-                } else if bytesWritten == 0 {
-                    // Stream full, wait briefly
-                    Thread.sleep(forTimeInterval: 0.001)
-                } else {
-                    offset += bytesWritten
-                    bytesRemaining -= bytesWritten
-                }
-            }
-        }
-    }
-    
-    func disconnect() {
-        streamQueue.async { [weak self] in
-            self?.cleanup()
-        }
-    }
-    
-    private func cleanup() {
-        inputStream?.close()
-        outputStream?.close()
-        inputStream = nil
-        outputStream = nil
-        isConnected = false
-        print("[TCPSocket] Disconnected")
     }
 }
 
