@@ -9,27 +9,12 @@
 /* Begin PBXBuildFile section */
 		5A63EA842EC68C2400003406 /* SocketIO in Frameworks */ = {isa = PBXBuildFile; productRef = 5A63EA832EC68C2400003406 /* SocketIO */; };
 		5ACC120D2EE8EC2A00EE38EA /* GStreamer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5ACC120C2EE8EC2A00EE38EA /* GStreamer.framework */; };
-		5ACC120E2EE8EC2A00EE38EA /* GStreamer.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 5ACC120C2EE8EC2A00EE38EA /* GStreamer.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		5ACC12112EE8F27000EE38EA /* libiconv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 5ACC12102EE8F25E00EE38EA /* libiconv.tbd */; };
 		5AHAISHIN003EC68C2400003406 /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5AHAISHIN002EC68C2400003406 /* HaishinKit */; };
 		5ARTMPHK003EC68C2400003406 /* RTMPHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5ARTMPHK002EC68C2400003406 /* RTMPHaishinKit */; };
 		5ASRTHK003EC68C2400003406 /* SRTHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5ASRTHK002EC68C2400003406 /* SRTHaishinKit */; };
 		5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 5AWEBRTC002EC68C2400003406 /* WebRTC */; };
 /* End PBXBuildFile section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		5ACC120F2EE8EC2A00EE38EA /* Embed Frameworks */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-				5ACC120E2EE8EC2A00EE38EA /* GStreamer.framework in Embed Frameworks */,
-			);
-			name = "Embed Frameworks";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		5A2DCEDB2EC2A54D0010CE4D /* Image_sender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Image_sender.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -112,7 +97,6 @@
 				5A2DCED72EC2A54D0010CE4D /* Sources */,
 				5A2DCED82EC2A54D0010CE4D /* Frameworks */,
 				5A2DCED92EC2A54D0010CE4D /* Resources */,
-				5ACC120F2EE8EC2A00EE38EA /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
