@@ -8,14 +8,33 @@
 
 /* Begin PBXBuildFile section */
 		5A63EA842EC68C2400003406 /* SocketIO in Frameworks */ = {isa = PBXBuildFile; productRef = 5A63EA832EC68C2400003406 /* SocketIO */; };
+		5ACC120D2EE8EC2A00EE38EA /* GStreamer.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5ACC120C2EE8EC2A00EE38EA /* GStreamer.framework */; };
+		5ACC120E2EE8EC2A00EE38EA /* GStreamer.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 5ACC120C2EE8EC2A00EE38EA /* GStreamer.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		5ACC12112EE8F27000EE38EA /* libiconv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 5ACC12102EE8F25E00EE38EA /* libiconv.tbd */; };
 		5AHAISHIN003EC68C2400003406 /* HaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5AHAISHIN002EC68C2400003406 /* HaishinKit */; };
 		5ARTMPHK003EC68C2400003406 /* RTMPHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5ARTMPHK002EC68C2400003406 /* RTMPHaishinKit */; };
 		5ASRTHK003EC68C2400003406 /* SRTHaishinKit in Frameworks */ = {isa = PBXBuildFile; productRef = 5ASRTHK002EC68C2400003406 /* SRTHaishinKit */; };
 		5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 5AWEBRTC002EC68C2400003406 /* WebRTC */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		5ACC120F2EE8EC2A00EE38EA /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				5ACC120E2EE8EC2A00EE38EA /* GStreamer.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		5A2DCEDB2EC2A54D0010CE4D /* Image_sender.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Image_sender.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5ACC120C2EE8EC2A00EE38EA /* GStreamer.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GStreamer.framework; path = ../../Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework; sourceTree = "<group>"; };
+		5ACC12102EE8F25E00EE38EA /* libiconv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libiconv.tbd; path = usr/lib/libiconv.tbd; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -48,7 +67,9 @@
 				5AWEBRTC003EC68C2400003406 /* WebRTC in Frameworks */,
 				5AHAISHIN003EC68C2400003406 /* HaishinKit in Frameworks */,
 				5ARTMPHK003EC68C2400003406 /* RTMPHaishinKit in Frameworks */,
+				5ACC12112EE8F27000EE38EA /* libiconv.tbd in Frameworks */,
 				5ASRTHK003EC68C2400003406 /* SRTHaishinKit in Frameworks */,
+				5ACC120D2EE8EC2A00EE38EA /* GStreamer.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -59,6 +80,7 @@
 			isa = PBXGroup;
 			children = (
 				5A2DCEDD2EC2A54D0010CE4D /* Image_sender */,
+				5ACC120B2EE8EC2A00EE38EA /* Frameworks */,
 				5A2DCEDC2EC2A54D0010CE4D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -71,6 +93,15 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		5ACC120B2EE8EC2A00EE38EA /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				5ACC12102EE8F25E00EE38EA /* libiconv.tbd */,
+				5ACC120C2EE8EC2A00EE38EA /* GStreamer.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -81,6 +112,7 @@
 				5A2DCED72EC2A54D0010CE4D /* Sources */,
 				5A2DCED82EC2A54D0010CE4D /* Frameworks */,
 				5A2DCED92EC2A54D0010CE4D /* Resources */,
+				5ACC120F2EE8EC2A00EE38EA /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -113,6 +145,7 @@
 				TargetAttributes = {
 					5A2DCEDA2EC2A54D0010CE4D = {
 						CreatedOnToolsVersion = 26.1;
+						LastSwiftMigration = 2610;
 					};
 				};
 			};
@@ -285,14 +318,17 @@
 		5A2DCEE72EC2A54F0010CE4D /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KRAHAPP95T;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = /Users/quinton/Library/Developer/GStreamer/iPhone.sdk;
 				INFOPLIST_FILE = Image_sender/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -304,6 +340,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = /Users/quinton/Library/Developer/GStreamer/iPhone.sdk;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.quinton.Image-sender";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -312,8 +349,15 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Image_sender/Image_sender-Bridging-Header.h";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
+				SYSTEM_FRAMEWORK_SEARCH_PATHS = /Users/quinton/Library/Developer/GStreamer/iPhone.sdk;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/Users/quinton/Library/Developer/GStreamer/iPhone.sdk,
+					/Users/quinton/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Versions/1.0/Headers,
+				);
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -321,14 +365,17 @@
 		5A2DCEE82EC2A54F0010CE4D /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = KRAHAPP95T;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = /Users/quinton/Library/Developer/GStreamer/iPhone.sdk;
 				INFOPLIST_FILE = Image_sender/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -340,6 +387,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				LIBRARY_SEARCH_PATHS = /Users/quinton/Library/Developer/GStreamer/iPhone.sdk;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.quinton.Image-sender";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -348,8 +396,14 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Image_sender/Image_sender-Bridging-Header.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
+				SYSTEM_FRAMEWORK_SEARCH_PATHS = /Users/quinton/Library/Developer/GStreamer/iPhone.sdk;
+				SYSTEM_HEADER_SEARCH_PATHS = (
+					/Users/quinton/Library/Developer/GStreamer/iPhone.sdk,
+					/Users/quinton/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework/Versions/1.0/Headers,
+				);
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
